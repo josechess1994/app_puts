@@ -1,6 +1,0 @@
-
-streamlit
-pandas
-requests
-yfinance
-scipy
