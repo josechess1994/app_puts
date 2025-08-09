@@ -1,0 +1,3 @@
+# No subas secretos
+.env
+.streamlit/secrets.toml
