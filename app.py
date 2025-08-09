@@ -7,27 +7,31 @@ import concurrent.futures
 from datetime import datetime
 from scipy.stats import norm
 import yfinance as yf
+from functools import partial
 
-# ========= Token seguro (st.secrets o variable de entorno) =========
-# Opción A: Streamlit Cloud -> añade TRADIER_TOKEN en "Settings > Secrets"
-# Opción B: Local -> crea un .env con TRADIER_TOKEN=... y exporta la variable
-try:
-    from dotenv import load_dotenv  # opcional si usas .env en local
-    load_dotenv()
-except Exception:
-    pass
+# ================== TOKEN SEGURO ==================
+# 1) En Streamlit Cloud: ve a Settings → Secrets y añade:
+#    TRADIER_TOKEN = "tu_token_de_tradier"
+# 2) En local (opcional): exporta TRADIER_TOKEN como variable de entorno.
+def _get_tradier_token():
+    tok = None
+    try:
+        # en Streamlit Cloud
+        tok = st.secrets.get("TRADIER_TOKEN", None)
+    except Exception:
+        pass
+    if not tok:
+        # en local por variable de entorno
+        tok = os.getenv("TRADIER_TOKEN")
+    return tok
 
-TOKEN = (getattr(st, "secrets", {}).get("TRADIER_TOKEN")
-         if hasattr(st, "secrets") else None) or os.getenv("TRADIER_TOKEN")
-
-if not TOKEN:
-    st.set_page_config(page_title="Filtro Estrategias Opciones", layout="wide")
-    st.error("❌ Falta TRADIER_TOKEN. Ponlo en Streamlit Secrets o como variable de entorno.")
-    st.stop()
-
-# --- CONFIGURACIÓN ---
 BASE_URL = "https://api.tradier.com/v1"
-HEADERS  = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
+TOKEN = _get_tradier_token()
+if not TOKEN:
+    st.error("Falta el token. Añade TRADIER_TOKEN en Settings → Secrets (Streamlit) o como variable de entorno.")
+    st.stop()
+HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
+# ==================================================
 
 # --- AUXILIARES ---
 @st.cache_data
@@ -59,7 +63,7 @@ def black_scholes_put_iv(S, K, T, price=0.01, r=0.04):
         d1 = (np.log(S/K) + (r+0.5*sigma**2)*T) / (sigma*np.sqrt(T))
         d2 = d1 - sigma*np.sqrt(T)
         model = K*np.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
-        vega  = max(S*np.sqrt(T)*norm.pdf(d1), 1e-8)
+        vega  = S*np.sqrt(T)*norm.pdf(d1)
         diff  = model - price
         if abs(diff) < eps:
             return sigma
@@ -236,6 +240,8 @@ def iron_fly(df, width_range, delta_range, credit_range):
 
 def jade_lizard(df, w_call_range, d_put_range, d_call_range, credit_range):
     rows=[]
+    puts=df[df.OptionType=="put"]
+    calls=df[df.OptionType=="call"]
     for (sym,exp),grp in df.groupby(["Ticker","Expiración"]):
         sp=grp[(grp.OptionType=="put")&(grp.Delta.between(d_put_range[0],d_put_range[1]))]
         sc=grp[(grp.OptionType=="call")&(grp.Delta.between(d_call_range[0],d_call_range[1]))]
@@ -262,10 +268,9 @@ def jade_lizard(df, w_call_range, d_put_range, d_call_range, credit_range):
 st.set_page_config(page_title="Filtro Estrategias Opciones", layout="wide")
 st.title("⚡ Filtro Base + Estrategias (S&P 500)")
 
-# Selector opcional de tickers (agrega un checkbox para seleccionar todos)
+# Selector opcional de tickers
 all_tickers = obtener_tickers_sp500()
-select_all = st.sidebar.checkbox("Seleccionar todos los tickers", value=True)
-selected_tickers = all_tickers if select_all else st.sidebar.multiselect("Tickers", all_tickers, default=[])
+selected_tickers = st.sidebar.multiselect("Tickers", all_tickers, default=all_tickers)
 
 # Parámetros base
 st.sidebar.header("1. Configurar Base")
@@ -276,9 +281,8 @@ r_iv   = st.sidebar.slider("IV (%)",0.0,100.0,(0.0,100.0))
 r_ir   = st.sidebar.slider("IV Rank",0.0,100.0,(0.0,100.0))
 r_ch   = st.sidebar.slider("Cambio 1M (%)",-100.0,100.0,(-100.0,100.0))
 workers= st.sidebar.number_input("Hilos",2,50,20)
-if st.sidebar.button("🔄 Cargar base"): 
-    tickers = selected_tickers if (not select_all) else all_tickers
-    df_base = cargar_base(tickers, workers)
+if st.sidebar.button("🔄 Cargar base"):
+    df_base = cargar_base(selected_tickers, workers)
     st.session_state["base_df"] = df_base
     st.success(f"Base cargada: {len(df_base)} contratos")
 
@@ -302,8 +306,8 @@ if "base_df" in st.session_state:
         "Put credit spread","Bear call spread","Iron Condor",
         "Iron Fly","Jade Lizard","Broken Wing Butterfly"
     ])
-    w_range = st.sidebar.slider("Width range",1,20,(1,5))
-    cred_range = st.sidebar.slider("Mid Credit range",-10.0,10.0,(-1.0,1.0))
+    w_range   = st.sidebar.slider("Width range",1,20,(1,5))
+    cred_range= st.sidebar.slider("Mid Credit range",-10.0,10.0,(-1.0,1.0))
 
     if strat == "Put credit spread":
         d_range = st.sidebar.slider("Delta short put",-1.0,0.0,(-0.3,-0.15))
@@ -322,7 +326,7 @@ if "base_df" in st.session_state:
         dp = st.sidebar.slider("Delta short put",-1.0,0.0,(-0.3,-0.15))
         dc = st.sidebar.slider("Delta short call",0.0,1.0,(0.15,0.3))
         if st.sidebar.button("Aplicar estrategia"): out = jade_lizard(df,w_range,dp,dc,cred_range)
-    else:  # Broken Wing Butterfly (usa iron_fly como base)
+    else:  # Broken Wing Butterfly
         d_range = st.sidebar.slider("Delta short central",-1.0,1.0,(-0.15,0.15))
         if st.sidebar.button("Aplicar estrategia"): out = iron_fly(df,(-w_range[1],w_range[1]),d_range,cred_range)
 
