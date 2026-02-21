@@ -5,6 +5,7 @@ import numpy as np
 import requests
 import concurrent.futures
 from itertools import repeat
+from datetime import datetime, timedelta
 from datetime import datetime
 from scipy.stats import norm
 import yfinance as yf
@@ -188,6 +189,59 @@ def get_quote(symbol):
     except Exception:
         return {}
 
+@lru_cache(maxsize=1024)
+def get_daily_closes(symbol, lookback_days=400):
+    try:
+        end = datetime.now().date()
+        start = end - timedelta(days=lookback_days)
+        r = SESSION.get(
+            f"{BASE_URL}/markets/history",
+            params={
+                "symbol": symbol,
+                "interval": "daily",
+                "start": start.strftime("%Y-%m-%d"),
+                "end": end.strftime("%Y-%m-%d"),
+            },
+            timeout=10,
+        )
+        history = r.json().get("history", {}).get("day", [])
+        if isinstance(history, dict):
+            history = [history]
+        closes = [float(d.get("close")) for d in history if d.get("close") is not None]
+        return closes
+    except Exception:
+        return []
+
+
+def calcular_trend_status(price, closes):
+    try:
+        if price is None or len(closes) < 200:
+            return None, None, None
+
+        ser = pd.Series(closes, dtype="float64")
+        sma50 = ser.rolling(50).mean().iloc[-1]
+        sma200 = ser.rolling(200).mean().iloc[-1]
+        if pd.isna(sma50) or pd.isna(sma200) or sma50 == 0 or sma200 == 0:
+            return None, None, None
+
+        pct_from_ma50 = (price - sma50) / sma50
+        pct_from_ma200 = (price - sma200) / sma200
+
+        if price > sma50 and sma50 > sma200:
+            trend = "STRONG_UPTREND"
+        elif price < sma50 and price > sma200 and sma50 > sma200:
+            trend = "PULLBACK"
+        elif price > sma200 and sma50 <= sma200:
+            trend = "TRANSITION"
+        elif price < sma200 and sma50 < sma200:
+            trend = "DOWNTREND"
+        else:
+            trend = "TRANSITION"
+
+        return trend, round(pct_from_ma50 * 100, 2), round(pct_from_ma200 * 100, 2)
+    except Exception:
+        return None, None, None
+
 def _pop_from_delta(delta_val):
     try:
         return round((1 - abs(float(delta_val))) * 100, 1)
@@ -215,6 +269,7 @@ def procesar_ticker(
     cambio_2m = obtener_cambio_periodo(ticker, "2mo")
     cambio_3m = obtener_cambio_periodo(ticker, "3mo")
     prox_earnings = obtener_proximo_earnings(ticker)
+    trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(last, get_daily_closes(ticker))
 
     expirations = get_expirations(ticker)
     valid = []
@@ -291,6 +346,9 @@ def procesar_ticker(
                     "Próximo Earnings": prox_earnings.strftime("%Y-%m-%d") if prox_earnings else None,
                     "Días a Earnings": dias_a_earnings,
                     "Earnings antes exp": "Sí" if earnings_en_ciclo else "No",
+                    "Trend Status": trend_status,
+                    "Pct from MA50 (%)": pct_from_ma50,
+                    "Pct from MA200 (%)": pct_from_ma200,
                 }
             )
     return registros
@@ -348,6 +406,9 @@ def put_credit_spread(df, width_range, delta_range, credit_range):
                         "Próximo Earnings": s["Próximo Earnings"],
                         "Días a Earnings": s["Días a Earnings"],
                         "Earnings antes exp": s["Earnings antes exp"],
+                        "Trend Status": s["Trend Status"],
+                        "Pct from MA50 (%)": s["Pct from MA50 (%)"],
+                        "Pct from MA200 (%)": s["Pct from MA200 (%)"],
                         "Width": w,
                         "Mid Credit": round(mc, 2),
                         "Return %": round(ret, 2),
@@ -384,6 +445,9 @@ def bear_call_spread(df, width_range, delta_range, credit_range):
                         "Próximo Earnings": s["Próximo Earnings"],
                         "Días a Earnings": s["Días a Earnings"],
                         "Earnings antes exp": s["Earnings antes exp"],
+                        "Trend Status": s["Trend Status"],
+                        "Pct from MA50 (%)": s["Pct from MA50 (%)"],
+                        "Pct from MA200 (%)": s["Pct from MA200 (%)"],
                         "Width": w,
                         "Mid Credit": round(mc, 2),
                         "Return %": round(ret, 2),
@@ -423,6 +487,9 @@ def iron_condor(df, w_put_range, d_put_range, w_call_range, d_call_range, credit
                     "Próximo Earnings": p["Próximo Earnings"],
                     "Días a Earnings": p["Días a Earnings"],
                     "Earnings antes exp": p["Earnings antes exp"],
+                    "Trend Status": p["Trend Status"],
+                    "Pct from MA50 (%)": p["Pct from MA50 (%)"],
+                    "Pct from MA200 (%)": p["Pct from MA200 (%)"],
                     "Width Put": p.Width,
                     "Width Call": c.Width,
                     "Mid Credit Total": round(tot, 2),
@@ -505,6 +572,9 @@ def jade_lizard(df, w_call_range, d_put_range, d_call_range, credit_range):
                             "Próximo Earnings": p["Próximo Earnings"],
                             "Días a Earnings": p["Días a Earnings"],
                             "Earnings antes exp": p["Earnings antes exp"],
+                            "Trend Status": p["Trend Status"],
+                            "Pct from MA50 (%)": p["Pct from MA50 (%)"],
+                            "Pct from MA200 (%)": p["Pct from MA200 (%)"],
                             "Mid Credit": round(mc, 2),
                             "Return %": round(ret, 2),
                         }
@@ -569,6 +639,12 @@ r_ch = st.sidebar.slider("Cambio 1M (%)", -100.0, 100.0, st.session_state.get("k
 r_ch_2m = st.sidebar.slider("Cambio 2M (%)", -100.0, 100.0, st.session_state.get("k_ch_2m", (-100.0, 100.0)), key="k_ch_2m")
 r_ch_3m = st.sidebar.slider("Cambio 3M (%)", -100.0, 100.0, st.session_state.get("k_ch_3m", (-100.0, 100.0)), key="k_ch_3m")
 r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
+r_trend = st.sidebar.multiselect(
+    "Trend Status",
+    ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"],
+    default=st.session_state.get("k_trend", ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"]),
+    key="k_trend",
+)
 workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 20, key="k_workers")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
@@ -601,6 +677,10 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
     elif r_earnings == "Solo sin earnings":
         mask_earnings = base["Earnings antes exp"] == "No"
 
+    mask_trend = pd.Series(True, index=base.index)
+    if r_trend:
+        mask_trend = base["Trend Status"].isin(r_trend)
+
     df = base[
         base["OptionType"].isin(tipos_vista_sel)
         & base["Dias"].between(r_dias[0], r_dias[1])
@@ -612,6 +692,7 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
         & base["Cambio 2M (%)"].between(r_ch_2m[0], r_ch_2m[1])
         & base["Cambio 3M (%)"].between(r_ch_3m[0], r_ch_3m[1])
         & mask_earnings
+        & mask_trend
     ]
 
     st.subheader(f"🔖 Base filtrada: {len(df)} contratos")
