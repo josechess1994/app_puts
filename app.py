@@ -5,7 +5,7 @@ import numpy as np
 import requests
 import concurrent.futures
 from itertools import repeat
-from datetime import datetime
+from datetime import datetime, timedelta
 from scipy.stats import norm
 import yfinance as yf
 from requests.adapters import HTTPAdapter
@@ -125,9 +125,9 @@ def calcular_iv_rank(ticker):
         return None
 
 @lru_cache(maxsize=2048)
-def obtener_cambio_mensual(ticker):
+def obtener_cambio_periodo(ticker, period="1mo"):
     try:
-        hist = yf.Ticker(ticker).history(period="1mo")
+        hist = yf.Ticker(ticker).history(period=period)
         if hist is None or hist.empty or "Close" not in hist:
             return None
         close = hist["Close"]
@@ -139,6 +139,25 @@ def obtener_cambio_mensual(ticker):
         return round((fin - inicio) / inicio * 100, 2)
     except Exception:
         return None
+
+@lru_cache(maxsize=1024)
+def obtener_proximo_earnings(ticker):
+    try:
+        ed = yf.Ticker(ticker).get_earnings_dates(limit=4)
+        if ed is None or ed.empty:
+            return None
+        now_naive = datetime.now()
+        for idx in ed.index:
+            dt = pd.to_datetime(idx)
+            if pd.isna(dt):
+                continue
+            dt = dt.to_pydatetime().replace(tzinfo=None)
+            if dt >= now_naive:
+                return dt
+        return None
+    except Exception:
+        return None
+
 
 # =========================
 # API TRADIER (helpers)
@@ -169,6 +188,112 @@ def get_quote(symbol):
     except Exception:
         return {}
 
+@lru_cache(maxsize=1024)
+def get_daily_closes(symbol, lookback_days=400):
+    try:
+        end = datetime.now().date()
+        start = end - timedelta(days=lookback_days)
+        r = SESSION.get(
+            f"{BASE_URL}/markets/history",
+            params={
+                "symbol": symbol,
+                "interval": "daily",
+                "start": start.strftime("%Y-%m-%d"),
+                "end": end.strftime("%Y-%m-%d"),
+            },
+            timeout=10,
+        )
+        history = r.json().get("history", {}).get("day", [])
+        if isinstance(history, dict):
+            history = [history]
+        closes = [float(d.get("close")) for d in history if d.get("close") is not None]
+        return closes
+    except Exception:
+        return []
+
+
+def calcular_trend_status(price, closes):
+    try:
+        if price is None or len(closes) < 200:
+            return None, None, None
+
+        ser = pd.Series(closes, dtype="float64")
+        sma50 = ser.rolling(50).mean().iloc[-1]
+        sma200 = ser.rolling(200).mean().iloc[-1]
+        if pd.isna(sma50) or pd.isna(sma200) or sma50 == 0 or sma200 == 0:
+            return None, None, None
+
+        pct_from_ma50 = (price - sma50) / sma50
+        pct_from_ma200 = (price - sma200) / sma200
+
+        if price > sma50 and sma50 > sma200:
+            trend = "STRONG_UPTREND"
+        elif price < sma50 and price > sma200 and sma50 > sma200:
+            trend = "PULLBACK"
+        elif price > sma200 and sma50 <= sma200:
+            trend = "TRANSITION"
+        elif price < sma200 and sma50 < sma200:
+            trend = "DOWNTREND"
+        else:
+            trend = "TRANSITION"
+
+        return trend, round(pct_from_ma50 * 100, 2), round(pct_from_ma200 * 100, 2)
+    except Exception:
+        return None, None, None
+
+def calcular_metricas_desde_closes(price, closes, include_trend=True):
+    try:
+        if price is None or not closes:
+            return None, None, None, None, None, None, None, None
+
+        ser = pd.Series(closes, dtype="float64")
+        if ser.empty:
+            return None, None, None, None, None, None, None, None
+
+        # Cambios aproximados por días hábiles
+        def _pct_from_lookback(lookback):
+            if len(ser) <= lookback:
+                return None
+            inicio = float(ser.iloc[-(lookback + 1)])
+            fin = float(ser.iloc[-1])
+            if inicio == 0:
+                return None
+            return round((fin - inicio) / inicio * 100, 2)
+
+        cambio_1m = _pct_from_lookback(21)
+        cambio_2m = _pct_from_lookback(42)
+        cambio_3m = _pct_from_lookback(63)
+        cambio_6m = _pct_from_lookback(126)
+
+        ivr = None
+        if len(ser) >= 252:
+            ivs = ser.pct_change().rolling(21).std() * np.sqrt(252)
+            ivs = ivs.dropna()
+            if not ivs.empty:
+                act = ivs.iloc[-1]
+                denom = float(ivs.max() - ivs.min()) or 1e-8
+                ivr = round((act - ivs.min()) / denom * 100, 2)
+
+        trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(price, closes)
+        return ivr, cambio_1m, cambio_2m, cambio_3m, pct_from_ma50, pct_from_ma200, trend_status
+    except Exception:
+        return None, None, None, None, None, None, None, None
+
+def _fetch_earnings_pair(ticker):
+    return ticker, obtener_proximo_earnings(ticker)
+
+
+def prefetch_earnings_map(tickers, max_workers=8):
+    if not tickers:
+        return {}
+    workers = max(1, min(int(max_workers or 1), len(tickers), 32))
+    out = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for ticker, dt in ex.map(_fetch_earnings_pair, tickers):
+            out[ticker] = dt
+    return out
+
+
 def _pop_from_delta(delta_val):
     try:
         return round((1 - abs(float(delta_val))) * 100, 1)
@@ -184,6 +309,9 @@ def procesar_ticker(
     dias_range=(1, 60),
     max_expirations=0,
     atm_window_range=(0, 100),
+    include_earnings=False,
+    include_trend=True,
+    earnings_map=None,
 ):
     registros = []
     q = get_quote(ticker)
@@ -191,8 +319,9 @@ def procesar_ticker(
     if last is None:
         return registros
 
-    ivr = calcular_iv_rank(ticker)
-    cambio = obtener_cambio_mensual(ticker)
+    closes = get_daily_closes(ticker)
+    ivr, cambio_1m, cambio_2m, cambio_3m, cambio_6m, pct_from_ma50, pct_from_ma200, trend_status = calcular_metricas_desde_closes(last, closes, include_trend=include_trend)
+    prox_earnings = (earnings_map or {}).get(ticker) if include_earnings else None
 
     expirations = get_expirations(ticker)
     valid = []
@@ -213,6 +342,14 @@ def procesar_ticker(
 
     for exp, dias in valid:
         T = dias / 365
+        try:
+            exp_dt = datetime.strptime(exp, "%Y-%m-%d")
+        except Exception:
+            exp_dt = None
+
+        earnings_en_ciclo = bool(prox_earnings and exp_dt and datetime.now() <= prox_earnings <= exp_dt)
+        dias_a_earnings = (prox_earnings - datetime.now()).days if prox_earnings else None
+
         chain = get_option_chain(ticker, exp)
         if not chain:
             continue
@@ -255,20 +392,40 @@ def procesar_ticker(
                     "POP (%)": _pop_from_delta(delta),
                     "IV (%)": round(iv_pct, 2) if iv_pct is not None else None,
                     "IV Rank": ivr,
-                    "Cambio 1M (%)": cambio,
+                    "Cambio 1M (%)": cambio_1m,
+                    "Cambio 2M (%)": cambio_2m,
+                    "Cambio 3M (%)": cambio_3m,
+                    "Cambio 6M (%)": cambio_6m,
+                    "Próximo Earnings": prox_earnings.strftime("%Y-%m-%d") if prox_earnings else None,
+                    "Días a Earnings": dias_a_earnings,
+                    "Earnings antes exp": "Sí" if earnings_en_ciclo else "No",
+                    "Trend Status": trend_status,
+                    "Pct from MA50 (%)": pct_from_ma50,
+                    "Pct from MA200 (%)": pct_from_ma200,
                 }
             )
     return registros
 
-def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range):
+def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range, include_earnings, include_trend, earnings_map):
     try:
-        return procesar_ticker(ticker, option_types, dias_range, max_expirations, atm_window_range)
+        return procesar_ticker(ticker, option_types, dias_range, max_expirations, atm_window_range, include_earnings, include_trend, earnings_map)
     except Exception:
         # Si algo raro pasa en un ticker, seguimos con los demás
         return []
 
-def cargar_base(tickers, option_types, dias_range, max_expirations, atm_window_range, max_workers=20):
+def cargar_base(
+    tickers,
+    option_types,
+    dias_range,
+    max_expirations,
+    atm_window_range,
+    include_earnings=False,
+    include_trend=True,
+    max_workers=20,
+    earnings_workers=8,
+):
     all_regs = []
+    earnings_map = prefetch_earnings_map(tickers, max_workers=earnings_workers) if include_earnings else {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for regs in executor.map(
             procesar_ticker_safe,
@@ -277,6 +434,9 @@ def cargar_base(tickers, option_types, dias_range, max_expirations, atm_window_r
             repeat(tuple(dias_range)),
             repeat(max_expirations),
             repeat(tuple(atm_window_range)),
+            repeat(include_earnings),
+            repeat(include_trend),
+            repeat(earnings_map),
         ):
             all_regs.extend(regs)
     return pd.DataFrame(all_regs)
@@ -308,6 +468,15 @@ def put_credit_spread(df, width_range, delta_range, credit_range):
                         "IV (%)": s["IV (%)"],
                         "IV Rank": s["IV Rank"],
                         "Cambio 1M (%)": s["Cambio 1M (%)"],
+                        "Cambio 2M (%)": s["Cambio 2M (%)"],
+                        "Cambio 3M (%)": s["Cambio 3M (%)"],
+                        "Cambio 6M (%)": s["Cambio 6M (%)"],
+                        "Próximo Earnings": s["Próximo Earnings"],
+                        "Días a Earnings": s["Días a Earnings"],
+                        "Earnings antes exp": s["Earnings antes exp"],
+                        "Trend Status": s["Trend Status"],
+                        "Pct from MA50 (%)": s["Pct from MA50 (%)"],
+                        "Pct from MA200 (%)": s["Pct from MA200 (%)"],
                         "Width": w,
                         "Mid Credit": round(mc, 2),
                         "Return %": round(ret, 2),
@@ -339,6 +508,15 @@ def bear_call_spread(df, width_range, delta_range, credit_range):
                         "IV (%)": s["IV (%)"],
                         "IV Rank": s["IV Rank"],
                         "Cambio 1M (%)": s["Cambio 1M (%)"],
+                        "Cambio 2M (%)": s["Cambio 2M (%)"],
+                        "Cambio 3M (%)": s["Cambio 3M (%)"],
+                        "Cambio 6M (%)": s["Cambio 6M (%)"],
+                        "Próximo Earnings": s["Próximo Earnings"],
+                        "Días a Earnings": s["Días a Earnings"],
+                        "Earnings antes exp": s["Earnings antes exp"],
+                        "Trend Status": s["Trend Status"],
+                        "Pct from MA50 (%)": s["Pct from MA50 (%)"],
+                        "Pct from MA200 (%)": s["Pct from MA200 (%)"],
                         "Width": w,
                         "Mid Credit": round(mc, 2),
                         "Return %": round(ret, 2),
@@ -373,6 +551,15 @@ def iron_condor(df, w_put_range, d_put_range, w_call_range, d_call_range, credit
                     "IV (%)": p["IV (%)"],
                     "IV Rank": p["IV Rank"],
                     "Cambio 1M (%)": p["Cambio 1M (%)"],
+                    "Cambio 2M (%)": p["Cambio 2M (%)"],
+                    "Cambio 3M (%)": p["Cambio 3M (%)"],
+                    "Cambio 6M (%)": p["Cambio 6M (%)"],
+                    "Próximo Earnings": p["Próximo Earnings"],
+                    "Días a Earnings": p["Días a Earnings"],
+                    "Earnings antes exp": p["Earnings antes exp"],
+                    "Trend Status": p["Trend Status"],
+                    "Pct from MA50 (%)": p["Pct from MA50 (%)"],
+                    "Pct from MA200 (%)": p["Pct from MA200 (%)"],
                     "Width Put": p.Width,
                     "Width Call": c.Width,
                     "Mid Credit Total": round(tot, 2),
@@ -408,6 +595,12 @@ def iron_fly(df, width_range, delta_range, credit_range):
                         "IV (%)": s["IV (%)"],
                         "IV Rank": s["IV Rank"],
                         "Cambio 1M (%)": s["Cambio 1M (%)"],
+                        "Cambio 2M (%)": s["Cambio 2M (%)"],
+                        "Cambio 3M (%)": s["Cambio 3M (%)"],
+                        "Cambio 6M (%)": s["Cambio 6M (%)"],
+                        "Próximo Earnings": s["Próximo Earnings"],
+                        "Días a Earnings": s["Días a Earnings"],
+                        "Earnings antes exp": s["Earnings antes exp"],
                         "Mid Credit": round(mc, 2),
                         "Return %": round(ret, 2),
                     }
@@ -445,6 +638,15 @@ def jade_lizard(df, w_call_range, d_put_range, d_call_range, credit_range):
                             "IV (%)": p["IV (%)"],
                             "IV Rank": p["IV Rank"],
                             "Cambio 1M (%)": p["Cambio 1M (%)"],
+                            "Cambio 2M (%)": p["Cambio 2M (%)"],
+                            "Cambio 3M (%)": p["Cambio 3M (%)"],
+                            "Cambio 6M (%)": p["Cambio 6M (%)"],
+                            "Próximo Earnings": p["Próximo Earnings"],
+                            "Días a Earnings": p["Días a Earnings"],
+                            "Earnings antes exp": p["Earnings antes exp"],
+                            "Trend Status": p["Trend Status"],
+                            "Pct from MA50 (%)": p["Pct from MA50 (%)"],
+                            "Pct from MA200 (%)": p["Pct from MA200 (%)"],
                             "Mid Credit": round(mc, 2),
                             "Return %": round(ret, 2),
                         }
@@ -486,10 +688,13 @@ if not option_types_to_load:
 st.sidebar.header("Preset")
 if st.sidebar.button("Preset (20–45 DTE, Δ −0.30 a +0.30, IV ≥ 25%, IVR ≥ 30%)"):
     st.session_state["k_dias"] = (20, 45)
-    st.session_state["k_delta"] = (-0.30, 0.30)
+    st.session_state["k_delta"] = (-0.35, -0.05)
     st.session_state["k_iv"] = (25.0, 100.0)
     st.session_state["k_ivr"] = (30.0, 100.0)
-    st.session_state["k_ch"] = (-100.0, 100.0)
+    st.session_state["k_ch"] = (-100.0, 5.0)
+    st.session_state["k_ch_2m"] = (-100.0, 10.0)
+    st.session_state["k_ch_3m"] = (-100.0, 100.0)
+    st.session_state["k_ch_6m"] = (-100.0, 100.0)
     st.rerun()
 
 # 1) Configurar Base
@@ -504,6 +709,21 @@ r_dlt = st.sidebar.slider("Delta", -1.0, 1.0, st.session_state.get("k_delta", (-
 r_iv = st.sidebar.slider("IV (%)", 0.0, 100.0, st.session_state.get("k_iv", (0.0, 100.0)), key="k_iv")
 r_ir = st.sidebar.slider("IV Rank", 0.0, 100.0, st.session_state.get("k_ivr", (0.0, 100.0)), key="k_ivr")
 r_ch = st.sidebar.slider("Cambio 1M (%)", -100.0, 100.0, st.session_state.get("k_ch", (-100.0, 100.0)), key="k_ch")
+r_ch_2m = st.sidebar.slider("Cambio 2M (%)", -100.0, 100.0, st.session_state.get("k_ch_2m", (-100.0, 100.0)), key="k_ch_2m")
+r_ch_3m = st.sidebar.slider("Cambio 3M (%)", -100.0, 100.0, st.session_state.get("k_ch_3m", (-100.0, 100.0)), key="k_ch_3m")
+r_ch_6m = st.sidebar.slider("Cambio 6M (%)", -100.0, 100.0, st.session_state.get("k_ch_6m", (-100.0, 100.0)), key="k_ch_6m")
+use_earnings_filter = st.sidebar.checkbox("Usar filtro Earnings", value=st.session_state.get("k_use_earnings_filter", True), key="k_use_earnings_filter")
+r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
+include_earnings = st.sidebar.checkbox("Calcular earnings (más lento)", value=st.session_state.get("k_include_earnings", False), key="k_include_earnings")
+earnings_workers = st.sidebar.number_input("Hilos earnings", 1, 32, 8, key="k_earnings_workers") if include_earnings else 8
+use_trend_filter = st.sidebar.checkbox("Usar filtro Trend Status", value=st.session_state.get("k_use_trend_filter", True), key="k_use_trend_filter")
+include_trend = use_trend_filter
+r_trend = st.sidebar.multiselect(
+    "Trend Status",
+    ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"],
+    default=st.session_state.get("k_trend", ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"]),
+    key="k_trend",
+)
 workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 20, key="k_workers")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
@@ -516,19 +736,49 @@ if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_t
             r_dias,
             max_exp,
             atm_win,
+            include_earnings=include_earnings,
+            include_trend=include_trend,
             max_workers=workers,
+            earnings_workers=earnings_workers,
         )
     st.session_state["base_df"] = df_base
     st.success(f"Base cargada: {len(df_base)} contratos")
 
 # 2) Mostrar/filtrar base
 if "base_df" in st.session_state and not st.session_state["base_df"].empty:
-    base = st.session_state["base_df"]
+    base = st.session_state["base_df"].copy()
+
+    # Compatibilidad hacia atrás para bases cargadas antes de nuevos campos
+    defaults = {
+        "Cambio 6M (%)": None,
+        "Próximo Earnings": None,
+        "Días a Earnings": None,
+        "Earnings antes exp": "No",
+        "Trend Status": None,
+        "Pct from MA50 (%)": None,
+        "Pct from MA200 (%)": None,
+    }
+    for col, val in defaults.items():
+        if col not in base.columns:
+            base[col] = val
 
     tipos_vista = sorted(base["OptionType"].dropna().unique().tolist())
     tipos_vista_sel = st.sidebar.multiselect(
         "Tipos a mostrar", ["put", "call"], default=tipos_vista if tipos_vista else ["put", "call"], key="k_types_view"
     )
+
+    mask_earnings = pd.Series(True, index=base.index)
+    if use_earnings_filter:
+        if r_earnings != "Todos" and not include_earnings:
+            st.sidebar.warning("Activa 'Calcular earnings (más lento)' para filtrar por earnings.")
+        elif r_earnings == "Solo con earnings":
+            mask_earnings = base["Earnings antes exp"] == "Sí"
+        elif r_earnings == "Solo sin earnings":
+            mask_earnings = base["Earnings antes exp"] == "No"
+
+    mask_trend = pd.Series(True, index=base.index)
+    if use_trend_filter and r_trend:
+        mask_trend = base["Trend Status"].isin(r_trend)
 
     df = base[
         base["OptionType"].isin(tipos_vista_sel)
@@ -538,6 +788,11 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
         & base["IV (%)"].between(r_iv[0], r_iv[1])
         & base["IV Rank"].between(r_ir[0], r_ir[1])
         & base["Cambio 1M (%)"].between(r_ch[0], r_ch[1])
+        & base["Cambio 2M (%)"].between(r_ch_2m[0], r_ch_2m[1])
+        & base["Cambio 3M (%)"].between(r_ch_3m[0], r_ch_3m[1])
+        & base["Cambio 6M (%)"].between(r_ch_6m[0], r_ch_6m[1])
+        & mask_earnings
+        & mask_trend
     ]
 
     st.subheader(f"🔖 Base filtrada: {len(df)} contratos")
