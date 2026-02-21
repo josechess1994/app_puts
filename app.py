@@ -766,6 +766,21 @@ if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_t
 
 # 2) Mostrar/filtrar base
 if "base_df" in st.session_state and not st.session_state["base_df"].empty:
+    base = st.session_state["base_df"].copy()
+
+    # Compatibilidad hacia atrás para bases cargadas antes de nuevos campos
+    defaults = {
+        "Cambio 6M (%)": None,
+        "Próximo Earnings": None,
+        "Días a Earnings": None,
+        "Earnings antes exp": "No",
+        "Trend Status": None,
+        "Pct from MA50 (%)": None,
+        "Pct from MA200 (%)": None,
+    }
+    for col, val in defaults.items():
+        if col not in base.columns:
+            base[col] = val
     base = st.session_state["base_df"]
 
     tipos_vista = sorted(base["OptionType"].dropna().unique().tolist())
