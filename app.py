@@ -6,6 +6,7 @@ import requests
 import concurrent.futures
 from itertools import repeat
 from datetime import datetime, timedelta
+from datetime import datetime
 from scipy.stats import norm
 import yfinance as yf
 from requests.adapters import HTTPAdapter
@@ -241,43 +242,6 @@ def calcular_trend_status(price, closes):
     except Exception:
         return None, None, None
 
-def calcular_metricas_desde_closes(price, closes):
-    try:
-        if price is None or not closes:
-            return None, None, None, None, None, None, None
-
-        ser = pd.Series(closes, dtype="float64")
-        if ser.empty:
-            return None, None, None, None, None, None, None
-
-        # Cambios aproximados por días hábiles
-        def _pct_from_lookback(lookback):
-            if len(ser) <= lookback:
-                return None
-            inicio = float(ser.iloc[-(lookback + 1)])
-            fin = float(ser.iloc[-1])
-            if inicio == 0:
-                return None
-            return round((fin - inicio) / inicio * 100, 2)
-
-        cambio_1m = _pct_from_lookback(21)
-        cambio_2m = _pct_from_lookback(42)
-        cambio_3m = _pct_from_lookback(63)
-
-        ivr = None
-        if len(ser) >= 252:
-            ivs = ser.pct_change().rolling(21).std() * np.sqrt(252)
-            ivs = ivs.dropna()
-            if not ivs.empty:
-                act = ivs.iloc[-1]
-                denom = float(ivs.max() - ivs.min()) or 1e-8
-                ivr = round((act - ivs.min()) / denom * 100, 2)
-
-        trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(price, closes)
-        return ivr, cambio_1m, cambio_2m, cambio_3m, pct_from_ma50, pct_from_ma200, trend_status
-    except Exception:
-        return None, None, None, None, None, None, None
-
 def _pop_from_delta(delta_val):
     try:
         return round((1 - abs(float(delta_val))) * 100, 1)
@@ -300,9 +264,12 @@ def procesar_ticker(
     if last is None:
         return registros
 
-    closes = get_daily_closes(ticker)
-    ivr, cambio_1m, cambio_2m, cambio_3m, pct_from_ma50, pct_from_ma200, trend_status = calcular_metricas_desde_closes(last, closes)
+    ivr = calcular_iv_rank(ticker)
+    cambio_1m = obtener_cambio_periodo(ticker, "1mo")
+    cambio_2m = obtener_cambio_periodo(ticker, "2mo")
+    cambio_3m = obtener_cambio_periodo(ticker, "3mo")
     prox_earnings = obtener_proximo_earnings(ticker)
+    trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(last, get_daily_closes(ticker))
 
     expirations = get_expirations(ticker)
     valid = []
