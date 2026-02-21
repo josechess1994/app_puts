@@ -6,6 +6,7 @@ import requests
 import concurrent.futures
 from itertools import repeat
 from datetime import datetime, timedelta
+from datetime import datetime
 from scipy.stats import norm
 import yfinance as yf
 from requests.adapters import HTTPAdapter
@@ -241,58 +242,6 @@ def calcular_trend_status(price, closes):
     except Exception:
         return None, None, None
 
-def calcular_metricas_desde_closes(price, closes):
-    try:
-        if price is None or not closes:
-            return None, None, None, None, None, None, None
-
-        ser = pd.Series(closes, dtype="float64")
-        if ser.empty:
-            return None, None, None, None, None, None, None
-
-        # Cambios aproximados por días hábiles
-        def _pct_from_lookback(lookback):
-            if len(ser) <= lookback:
-                return None
-            inicio = float(ser.iloc[-(lookback + 1)])
-            fin = float(ser.iloc[-1])
-            if inicio == 0:
-                return None
-            return round((fin - inicio) / inicio * 100, 2)
-
-        cambio_1m = _pct_from_lookback(21)
-        cambio_2m = _pct_from_lookback(42)
-        cambio_3m = _pct_from_lookback(63)
-
-        ivr = None
-        if len(ser) >= 252:
-            ivs = ser.pct_change().rolling(21).std() * np.sqrt(252)
-            ivs = ivs.dropna()
-            if not ivs.empty:
-                act = ivs.iloc[-1]
-                denom = float(ivs.max() - ivs.min()) or 1e-8
-                ivr = round((act - ivs.min()) / denom * 100, 2)
-
-        trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(price, closes)
-        return ivr, cambio_1m, cambio_2m, cambio_3m, pct_from_ma50, pct_from_ma200, trend_status
-    except Exception:
-        return None, None, None, None, None, None, None
-
-def _fetch_earnings_pair(ticker):
-    return ticker, obtener_proximo_earnings(ticker)
-
-
-def prefetch_earnings_map(tickers, max_workers=8):
-    if not tickers:
-        return {}
-    workers = max(1, min(int(max_workers or 1), len(tickers), 32))
-    out = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        for ticker, dt in ex.map(_fetch_earnings_pair, tickers):
-            out[ticker] = dt
-    return out
-
-
 def _pop_from_delta(delta_val):
     try:
         return round((1 - abs(float(delta_val))) * 100, 1)
@@ -308,8 +257,6 @@ def procesar_ticker(
     dias_range=(1, 60),
     max_expirations=0,
     atm_window_range=(0, 100),
-    include_earnings=False,
-    earnings_map=None,
 ):
     registros = []
     q = get_quote(ticker)
@@ -317,9 +264,12 @@ def procesar_ticker(
     if last is None:
         return registros
 
-    closes = get_daily_closes(ticker)
-    ivr, cambio_1m, cambio_2m, cambio_3m, pct_from_ma50, pct_from_ma200, trend_status = calcular_metricas_desde_closes(last, closes)
-    prox_earnings = (earnings_map or {}).get(ticker) if include_earnings else None
+    ivr = calcular_iv_rank(ticker)
+    cambio_1m = obtener_cambio_periodo(ticker, "1mo")
+    cambio_2m = obtener_cambio_periodo(ticker, "2mo")
+    cambio_3m = obtener_cambio_periodo(ticker, "3mo")
+    prox_earnings = obtener_proximo_earnings(ticker)
+    trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(last, get_daily_closes(ticker))
 
     expirations = get_expirations(ticker)
     valid = []
@@ -403,25 +353,15 @@ def procesar_ticker(
             )
     return registros
 
-def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range, include_earnings, earnings_map):
+def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range):
     try:
-        return procesar_ticker(ticker, option_types, dias_range, max_expirations, atm_window_range, include_earnings, earnings_map)
+        return procesar_ticker(ticker, option_types, dias_range, max_expirations, atm_window_range)
     except Exception:
         # Si algo raro pasa en un ticker, seguimos con los demás
         return []
 
-def cargar_base(
-    tickers,
-    option_types,
-    dias_range,
-    max_expirations,
-    atm_window_range,
-    include_earnings=False,
-    max_workers=20,
-    earnings_workers=8,
-):
+def cargar_base(tickers, option_types, dias_range, max_expirations, atm_window_range, max_workers=20):
     all_regs = []
-    earnings_map = prefetch_earnings_map(tickers, max_workers=earnings_workers) if include_earnings else {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for regs in executor.map(
             procesar_ticker_safe,
@@ -430,8 +370,6 @@ def cargar_base(
             repeat(tuple(dias_range)),
             repeat(max_expirations),
             repeat(tuple(atm_window_range)),
-            repeat(include_earnings),
-            repeat(earnings_map),
         ):
             all_regs.extend(regs)
     return pd.DataFrame(all_regs)
@@ -701,8 +639,6 @@ r_ch = st.sidebar.slider("Cambio 1M (%)", -100.0, 100.0, st.session_state.get("k
 r_ch_2m = st.sidebar.slider("Cambio 2M (%)", -100.0, 100.0, st.session_state.get("k_ch_2m", (-100.0, 100.0)), key="k_ch_2m")
 r_ch_3m = st.sidebar.slider("Cambio 3M (%)", -100.0, 100.0, st.session_state.get("k_ch_3m", (-100.0, 100.0)), key="k_ch_3m")
 r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
-include_earnings = st.sidebar.checkbox("Calcular earnings (más lento)", value=st.session_state.get("k_include_earnings", False), key="k_include_earnings")
-earnings_workers = st.sidebar.number_input("Hilos earnings", 1, 32, 8, key="k_earnings_workers") if include_earnings else 8
 r_trend = st.sidebar.multiselect(
     "Trend Status",
     ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"],
@@ -721,9 +657,7 @@ if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_t
             r_dias,
             max_exp,
             atm_win,
-            include_earnings=include_earnings,
             max_workers=workers,
-            earnings_workers=earnings_workers,
         )
     st.session_state["base_df"] = df_base
     st.success(f"Base cargada: {len(df_base)} contratos")
@@ -738,9 +672,7 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
     )
 
     mask_earnings = pd.Series(True, index=base.index)
-    if r_earnings != "Todos" and not include_earnings:
-        st.sidebar.warning("Activa 'Calcular earnings (más lento)' para filtrar por earnings.")
-    elif r_earnings == "Solo con earnings":
+    if r_earnings == "Solo con earnings":
         mask_earnings = base["Earnings antes exp"] == "Sí"
     elif r_earnings == "Solo sin earnings":
         mask_earnings = base["Earnings antes exp"] == "No"
