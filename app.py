@@ -1,3 +1,4 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/app.py b/app.py
 index 5b8d9d42f63ca30af5d968c25465be27cd96b41a..b610245e6f8f257348d705a64fd9313f0afb4917 100644
 --- a/app.py
@@ -1450,3 +1451,6 @@ index 5b8d9d42f63ca30af5d968c25465be27cd96b41a..b610245e6f8f257348d705a64fd9313f
 +        st.caption("Ajusta parámetros y pulsa 'Aplicar estrategia' para ver resultados.")
 +else:
 +    st.info("Carga la base desde la barra lateral.")
+ 
+EOF
+)
