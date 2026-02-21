@@ -6,6 +6,7 @@ import requests
 import concurrent.futures
 from itertools import repeat
 from datetime import datetime, timedelta
+from datetime import datetime
 from scipy.stats import norm
 import yfinance as yf
 from requests.adapters import HTTPAdapter
