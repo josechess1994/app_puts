@@ -6,6 +6,7 @@ import requests
 import concurrent.futures
 from itertools import repeat
 from datetime import datetime, timedelta
+from datetime import datetime
 from scipy.stats import norm
 import yfinance as yf
 from requests.adapters import HTTPAdapter
@@ -322,6 +323,12 @@ def procesar_ticker(
     closes = get_daily_closes(ticker)
     ivr, cambio_1m, cambio_2m, cambio_3m, cambio_6m, pct_from_ma50, pct_from_ma200, trend_status = calcular_metricas_desde_closes(last, closes, include_trend=include_trend)
     prox_earnings = (earnings_map or {}).get(ticker) if include_earnings else None
+    ivr = calcular_iv_rank(ticker)
+    cambio_1m = obtener_cambio_periodo(ticker, "1mo")
+    cambio_2m = obtener_cambio_periodo(ticker, "2mo")
+    cambio_3m = obtener_cambio_periodo(ticker, "3mo")
+    prox_earnings = obtener_proximo_earnings(ticker)
+    trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(last, get_daily_closes(ticker))
 
     expirations = get_expirations(ticker)
     valid = []
@@ -409,6 +416,9 @@ def procesar_ticker(
 def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range, include_earnings, include_trend, earnings_map):
     try:
         return procesar_ticker(ticker, option_types, dias_range, max_expirations, atm_window_range, include_earnings, include_trend, earnings_map)
+def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range):
+    try:
+        return procesar_ticker(ticker, option_types, dias_range, max_expirations, atm_window_range)
     except Exception:
         # Si algo raro pasa en un ticker, seguimos con los demás
         return []
@@ -426,6 +436,8 @@ def cargar_base(
 ):
     all_regs = []
     earnings_map = prefetch_earnings_map(tickers, max_workers=earnings_workers) if include_earnings else {}
+def cargar_base(tickers, option_types, dias_range, max_expirations, atm_window_range, max_workers=20):
+    all_regs = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for regs in executor.map(
             procesar_ticker_safe,
@@ -695,6 +707,12 @@ if st.sidebar.button("Preset (20–45 DTE, Δ −0.30 a +0.30, IV ≥ 25%, IVR �
     st.session_state["k_ch_2m"] = (-100.0, 10.0)
     st.session_state["k_ch_3m"] = (-100.0, 100.0)
     st.session_state["k_ch_6m"] = (-100.0, 100.0)
+    st.session_state["k_delta"] = (-0.30, 0.30)
+    st.session_state["k_iv"] = (25.0, 100.0)
+    st.session_state["k_ivr"] = (30.0, 100.0)
+    st.session_state["k_ch"] = (-100.0, 100.0)
+    st.session_state["k_ch_2m"] = (-100.0, 100.0)
+    st.session_state["k_ch_3m"] = (-100.0, 100.0)
     st.rerun()
 
 # 1) Configurar Base
@@ -718,6 +736,7 @@ include_earnings = st.sidebar.checkbox("Calcular earnings (más lento)", value=s
 earnings_workers = st.sidebar.number_input("Hilos earnings", 1, 32, 8, key="k_earnings_workers") if include_earnings else 8
 use_trend_filter = st.sidebar.checkbox("Usar filtro Trend Status", value=st.session_state.get("k_use_trend_filter", True), key="k_use_trend_filter")
 include_trend = use_trend_filter
+r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
 r_trend = st.sidebar.multiselect(
     "Trend Status",
     ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"],
@@ -740,6 +759,7 @@ if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_t
             include_trend=include_trend,
             max_workers=workers,
             earnings_workers=earnings_workers,
+            max_workers=workers,
         )
     st.session_state["base_df"] = df_base
     st.success(f"Base cargada: {len(df_base)} contratos")
@@ -761,6 +781,7 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
     for col, val in defaults.items():
         if col not in base.columns:
             base[col] = val
+    base = st.session_state["base_df"]
 
     tipos_vista = sorted(base["OptionType"].dropna().unique().tolist())
     tipos_vista_sel = st.sidebar.multiselect(
@@ -778,6 +799,13 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
 
     mask_trend = pd.Series(True, index=base.index)
     if use_trend_filter and r_trend:
+    if r_earnings == "Solo con earnings":
+        mask_earnings = base["Earnings antes exp"] == "Sí"
+    elif r_earnings == "Solo sin earnings":
+        mask_earnings = base["Earnings antes exp"] == "No"
+
+    mask_trend = pd.Series(True, index=base.index)
+    if r_trend:
         mask_trend = base["Trend Status"].isin(r_trend)
 
     df = base[
