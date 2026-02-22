@@ -312,6 +312,18 @@ def _render_active_filters_summary(r_dias, r_dlt, r_iv, r_ir, sel_horizon, r_ear
 def _render_formatted_table(df, cols_to_show):
     to_show = df[cols_to_show].copy()
 
+    if "Premium Edge" in to_show.columns:
+        def _premium_edge_badge(v):
+            if pd.isna(v):
+                return "⚪ N/A"
+            if v > 1.5:
+                return f"🟢 {v:.2f}"
+            if v >= 1.2:
+                return f"🟡 {v:.2f}"
+            return f"⚪ {v:.2f}"
+
+        to_show["Premium Edge"] = to_show["Premium Edge"].apply(_premium_edge_badge)
+
     if "Trend Status" in to_show.columns:
         to_show["Trend Badge"] = to_show["Trend Status"].map(TREND_BADGE).fillna("⚪ Pending")
     if "Días a Earnings" in to_show.columns:
@@ -331,6 +343,8 @@ def _render_formatted_table(df, cols_to_show):
         config[c] = st.column_config.NumberColumn(format="$%.2f")
     if "Dias" in to_show.columns:
         config["Dias"] = st.column_config.NumberColumn(format="%d")
+    if "Premium Edge" in to_show.columns:
+        config["Premium Edge"] = st.column_config.TextColumn()
 
     st.dataframe(to_show, use_container_width=True, hide_index=True, column_config=config)
 
@@ -362,6 +376,13 @@ def procesar_ticker(
     today = datetime.now().date()
     prox_earnings = obtener_proximo_earnings(ticker) if include_earnings else None
     trend_status, pct_from_ma50, pct_from_ma200 = None, None, None
+    closes = get_daily_closes(ticker, _today=today)
+    real_move_daily_std = None
+    if len(closes) >= 31:
+        close_ser = pd.Series(closes, dtype="float64")
+        daily_ret_std = close_ser.pct_change().dropna().tail(30).std()
+        if pd.notna(daily_ret_std):
+            real_move_daily_std = float(daily_ret_std)
 
     valid = list(valid_expirations or [])
     if not valid:
@@ -419,6 +440,10 @@ def procesar_ticker(
             iv_pct = iv_dec * 100 if iv_dec is not None else None
             delta = greeks.get("delta") or calcular_delta(last, strike, T, 0.04, iv_dec)
             ret = (mid / strike) / (max(dias, 1) / 30) * 100
+            expected_move_dollar = (last * iv_dec * np.sqrt(max(dias, 1) / 365)) if iv_dec is not None else None
+            expected_move_percent = (expected_move_dollar / last * 100) if expected_move_dollar is not None and last else None
+            real_move_dollar = (last * real_move_daily_std * np.sqrt(max(dias, 1))) if real_move_daily_std is not None else None
+            premium_edge = (expected_move_dollar / real_move_dollar) if expected_move_dollar is not None and real_move_dollar not in (None, 0) else None
 
             registros.append(
                 {
@@ -428,6 +453,9 @@ def procesar_ticker(
                     "Dias": dias,
                     "Strike": strike,
                     "Mid": round(mid, 4),
+                    "Expected Move ($)": round(expected_move_dollar, 4) if expected_move_dollar is not None else None,
+                    "Expected Move (%)": round(expected_move_percent, 2) if expected_move_percent is not None else None,
+                    "Premium Edge": round(premium_edge, 2) if premium_edge is not None else None,
                     "Retorno %": round(ret, 2),
                     "Delta": round(delta or 0, 3),
                     "POP (%)": _pop_from_delta(delta),
