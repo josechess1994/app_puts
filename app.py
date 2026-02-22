@@ -827,16 +827,17 @@ if sel_horizon != "Sin preset":
 
 # 1) Configurar Base
 st.sidebar.header("1. Configurar Base")
-r_dias = st.sidebar.slider("Días hasta expiración", 1, 184, st.session_state.get("k_dias", (1, 60)), key="k_dias")
-max_exp = st.sidebar.number_input("Máx. expiraciones por ticker (0 = sin límite)", 0, 30, 0, 1, key="k_maxexp")
+r_dias = st.sidebar.slider("Días hasta expiración", 1, 184, st.session_state.get("k_dias", (20, 45)), key="k_dias")
+max_exp = st.sidebar.number_input("Máx. expiraciones por ticker (0 = sin límite)", 0, 30, 6, 1, key="k_maxexp")
+top_n_tickers = st.sidebar.number_input("Top N tickers a cargar", 1, 1000, 150, 10, key="k_top_n_tickers")
 atm_win = st.sidebar.slider("Ventana ATM (min%, max%)", 0, 100, (0, 100), key="k_atm")
 
 # Filtros base (visual)
-r_ret = st.sidebar.slider("Retorno mensual (%)", -100.0, 100.0, st.session_state.get("k_ret", (-100.0, 100.0)), key="k_ret")
-r_dlt = st.sidebar.slider("Delta", -1.0, 1.0, st.session_state.get("k_delta", (-1.0, 1.0)), key="k_delta")
-r_iv = st.sidebar.slider("IV (%)", 0.0, 100.0, st.session_state.get("k_iv", (0.0, 100.0)), key="k_iv")
-r_ir = st.sidebar.slider("IV Rank", 0.0, 100.0, st.session_state.get("k_ivr", (0.0, 100.0)), key="k_ivr")
-r_ch = st.sidebar.slider("Cambio 1M (%)", -100.0, 100.0, st.session_state.get("k_ch", (-100.0, 100.0)), key="k_ch")
+r_ret = st.sidebar.slider("Retorno mensual (%)", -100.0, 100.0, st.session_state.get("k_ret", (1.0, 100.0)), key="k_ret")
+r_dlt = st.sidebar.slider("Delta", -1.0, 1.0, st.session_state.get("k_delta", (-0.30, -0.10)), key="k_delta")
+r_iv = st.sidebar.slider("IV (%)", 0.0, 100.0, st.session_state.get("k_iv", (25.0, 100.0)), key="k_iv")
+r_ir = st.sidebar.slider("IV Rank", 0.0, 100.0, st.session_state.get("k_ivr", (30.0, 100.0)), key="k_ivr")
+r_ch = st.sidebar.slider("Cambio 1M (%)", -100.0, 100.0, st.session_state.get("k_ch", (-50.0, 10.0)), key="k_ch")
 r_ch_2m = st.sidebar.slider("Cambio 2M (%)", -100.0, 100.0, st.session_state.get("k_ch_2m", (-100.0, 100.0)), key="k_ch_2m")
 r_ch_3m = st.sidebar.slider("Cambio 3M (%)", -100.0, 100.0, st.session_state.get("k_ch_3m", (-100.0, 100.0)), key="k_ch_3m")
 r_ch_6m = st.sidebar.slider("Cambio 6M (%)", -100.0, 100.0, st.session_state.get("k_ch_6m", (-100.0, 100.0)), key="k_ch_6m")
@@ -862,6 +863,7 @@ if compute_trend:
     compute_trend_now = st.sidebar.button("Compute Trend Now")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
+    tickers_to_load = selected_tickers[: int(top_n_tickers)]
     progress_bar = st.progress(0)
     status_line = st.empty()
     stage_times = {}
@@ -880,14 +882,14 @@ if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_t
 
     mark_stage("Loading tickers", 0.1)
     df_base, stage_stats = cargar_base(
-        selected_tickers,
+        tickers_to_load,
         option_types_to_load,
         r_dias,
         max_exp,
         atm_win,
         max_workers=workers,
         include_earnings=include_earnings,
-        include_trend=False,
+        include_trend=include_trend,
         progress_callback=mark_stage,
     )
     mark_stage("Building results table", 0.98)
