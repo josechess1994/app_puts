@@ -229,9 +229,8 @@ def get_daily_closes(symbol, lookback_days=400, _today=None):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_trend_status_cached(symbol, price, _today=None):
-    closes = get_daily_closes(symbol, _today=_today)
-    return calcular_trend_status(price, closes)
+def get_trend_closes_cached(symbol, _today=None):
+    return get_daily_closes(symbol, _today=_today)
 
 
 def calcular_trend_status(price, closes):
@@ -269,6 +268,12 @@ def _pop_from_delta(delta_val):
     except Exception:
         return None
 
+
+def _compute_trend_for_ticker(symbol, price, today):
+    closes = get_trend_closes_cached(symbol, _today=today)
+    trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(price, closes)
+    return symbol, trend_status, pct_from_ma50, pct_from_ma200
+
 # =========================
 # CONSTRUCCIÓN DE BASE
 # =========================
@@ -296,10 +301,7 @@ def procesar_ticker(
     cambio_6m = obtener_cambio_periodo(ticker, "6mo")
     today = datetime.now().date()
     prox_earnings = obtener_proximo_earnings(ticker) if include_earnings else None
-    if include_trend:
-        trend_status, pct_from_ma50, pct_from_ma200 = get_trend_status_cached(ticker, last, _today=today)
-    else:
-        trend_status, pct_from_ma50, pct_from_ma200 = None, None, None
+    trend_status, pct_from_ma50, pct_from_ma200 = None, None, None
 
     valid = list(valid_expirations or [])
     if not valid:
@@ -467,6 +469,29 @@ def cargar_base(
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for regs in executor.map(procesar_ticker_safe, ticker_args):
             all_regs.extend(regs)
+
+    if include_trend and all_regs:
+        today = datetime.now().date()
+        trend_targets = {
+            reg["Ticker"]: (quotes_map.get(reg["Ticker"], {}) or {}).get("last")
+            for reg in all_regs
+        }
+        trend_targets = {t: p for t, p in trend_targets.items() if p is not None}
+        if trend_targets:
+            trend_map = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for symbol, trend_status, pct_from_ma50, pct_from_ma200 in executor.map(
+                    _compute_trend_for_ticker,
+                    trend_targets.keys(),
+                    trend_targets.values(),
+                    repeat(today),
+                ):
+                    trend_map[symbol] = (trend_status, pct_from_ma50, pct_from_ma200)
+
+            for reg in all_regs:
+                trend_vals = trend_map.get(reg["Ticker"])
+                if trend_vals:
+                    reg["Trend Status"], reg["Pct from MA50 (%)"], reg["Pct from MA200 (%)"] = trend_vals
 
     return pd.DataFrame(all_regs), stage_stats
 
