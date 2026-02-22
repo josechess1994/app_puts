@@ -142,7 +142,7 @@ def obtener_cambio_periodo(ticker, period="1mo"):
     except Exception:
         return None
 
-@lru_cache(maxsize=1024)
+@st.cache_data(ttl=3600, show_spinner=False)
 def obtener_proximo_earnings(ticker):
     try:
         ed = yf.Ticker(ticker).get_earnings_dates(limit=4)
@@ -190,10 +190,10 @@ def get_quote(symbol):
     except Exception:
         return {}
 
-@lru_cache(maxsize=1024)
-def get_daily_closes(symbol, lookback_days=400):
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_daily_closes(symbol, lookback_days=400, _today=None):
     try:
-        end = datetime.now().date()
+        end = _today or datetime.now().date()
         start = end - timedelta(days=lookback_days)
         r = SESSION.get(
             f"{BASE_URL}/markets/history",
@@ -212,6 +212,12 @@ def get_daily_closes(symbol, lookback_days=400):
         return closes
     except Exception:
         return []
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_trend_status_cached(symbol, price, _today=None):
+    closes = get_daily_closes(symbol, _today=_today)
+    return calcular_trend_status(price, closes)
 
 
 def calcular_trend_status(price, closes):
@@ -269,8 +275,9 @@ def procesar_ticker(
     cambio_1m = obtener_cambio_periodo(ticker, "1mo")
     cambio_2m = obtener_cambio_periodo(ticker, "2mo")
     cambio_3m = obtener_cambio_periodo(ticker, "3mo")
+    today = datetime.now().date()
     prox_earnings = obtener_proximo_earnings(ticker)
-    trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(last, get_daily_closes(ticker))
+    trend_status, pct_from_ma50, pct_from_ma200 = get_trend_status_cached(ticker, last, _today=today)
 
     expirations = get_expirations(ticker)
     valid = []
@@ -625,9 +632,20 @@ if st.sidebar.button("Preset (20–45 DTE, Δ −0.30 a +0.30, IV ≥ 25%, IVR �
     st.session_state["k_ch_3m"] = (-100.0, 100.0)
     st.rerun()
 
+horizon_presets = {
+    "1 mes": 30,
+    "2 meses": 60,
+    "3 meses": 90,
+    "6 meses": 184,
+}
+sel_horizon = st.sidebar.selectbox("Horizonte", ["Sin preset"] + list(horizon_presets.keys()), key="k_horizon")
+if sel_horizon != "Sin preset":
+    st.session_state["k_dias"] = (1, horizon_presets[sel_horizon])
+    st.sidebar.caption(f"Rango aplicado: 1-{horizon_presets[sel_horizon]} días")
+
 # 1) Configurar Base
 st.sidebar.header("1. Configurar Base")
-r_dias = st.sidebar.slider("Días hasta expiración", 1, 60, st.session_state.get("k_dias", (1, 60)), key="k_dias")
+r_dias = st.sidebar.slider("Días hasta expiración", 1, 184, st.session_state.get("k_dias", (1, 60)), key="k_dias")
 max_exp = st.sidebar.number_input("Máx. expiraciones por ticker (0 = sin límite)", 0, 30, 0, 1, key="k_maxexp")
 atm_win = st.sidebar.slider("Ventana ATM (min%, max%)", 0, 100, (0, 100), key="k_atm")
 
