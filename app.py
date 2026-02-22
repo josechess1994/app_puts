@@ -1,5 +1,6 @@
 
 import os
+import json
 import time
 import streamlit as st
 import pandas as pd
@@ -14,6 +15,41 @@ import yfinance as yf
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from functools import lru_cache
+
+CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache", "daily_closes")
+DAILY_CLOSES_TTL_SECONDS = 24 * 60 * 60
+HISTORY_LOOKBACK_DAYS = 260
+TREND_HISTORY_TIMEOUT = 6
+
+
+def _daily_cache_path(symbol):
+    safe_symbol = (symbol or "").replace("/", "_").replace("\\", "_")
+    return os.path.join(CACHE_DIR, f"{safe_symbol}.json")
+
+
+def _read_daily_cache(symbol, now_ts):
+    path = _daily_cache_path(symbol)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        ts = float(payload.get("ts", 0))
+        closes = payload.get("closes", [])
+        if (now_ts - ts) <= DAILY_CLOSES_TTL_SECONDS and isinstance(closes, list):
+            return closes
+    except Exception:
+        return None
+    return None
+
+
+def _write_daily_cache(symbol, closes, now_ts):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(_daily_cache_path(symbol), "w", encoding="utf-8") as fh:
+            json.dump({"ts": now_ts, "closes": closes}, fh)
+    except Exception:
+        return
 
 # =========================
 # TOKEN SEGURO (secrets / env)
@@ -204,8 +240,12 @@ def get_quotes_batch(symbols):
     except Exception:
         return {}
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_daily_closes(symbol, lookback_days=400, _today=None):
+def get_daily_closes(symbol, lookback_days=HISTORY_LOOKBACK_DAYS, _today=None):
+    now_ts = time.time()
+    cached = _read_daily_cache(symbol, now_ts)
+    if cached is not None:
+        return cached
+
     try:
         end = _today or datetime.now().date()
         start = end - timedelta(days=lookback_days)
@@ -217,18 +257,19 @@ def get_daily_closes(symbol, lookback_days=400, _today=None):
                 "start": start.strftime("%Y-%m-%d"),
                 "end": end.strftime("%Y-%m-%d"),
             },
-            timeout=10,
+            timeout=TREND_HISTORY_TIMEOUT,
         )
         history = r.json().get("history", {}).get("day", [])
         if isinstance(history, dict):
             history = [history]
         closes = [float(d.get("close")) for d in history if d.get("close") is not None]
+        if closes:
+            _write_daily_cache(symbol, closes, now_ts)
         return closes
     except Exception:
         return []
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def get_trend_closes_cached(symbol, _today=None):
     return get_daily_closes(symbol, _today=_today)
 
@@ -478,10 +519,12 @@ def cargar_base(
     max_workers=20,
     include_earnings=True,
     include_trend=True,
+    quick_trend=False,
+    quick_trend_n=120,
     progress_callback=None,
 ):
     all_regs = []
-    stage_stats = {"phase_a_tickers": len(tickers), "phase_b_tickers": 0}
+    stage_stats = {"phase_a_tickers": len(tickers), "phase_b_tickers": 0, "trend_tickers": 0}
 
     if progress_callback:
         progress_callback("Fetching quotes", 0.25)
@@ -537,9 +580,29 @@ def cargar_base(
             for reg in all_regs
         }
         trend_targets = {t: p for t, p in trend_targets.items() if p is not None}
+
+        if quick_trend and quick_trend_n > 0 and trend_targets:
+            ranked = sorted(
+                all_regs,
+                key=lambda r: float(r.get("Retorno %", float("-inf"))),
+                reverse=True,
+            )
+            top_symbols = []
+            seen = set()
+            for reg in ranked:
+                sym = reg.get("Ticker")
+                if sym in trend_targets and sym not in seen:
+                    top_symbols.append(sym)
+                    seen.add(sym)
+                if len(top_symbols) >= quick_trend_n:
+                    break
+            trend_targets = {s: trend_targets[s] for s in top_symbols}
+
+        stage_stats["trend_tickers"] = len(trend_targets)
         if trend_targets:
             trend_map = {}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            trend_workers = max(2, min(max_workers, 30))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=trend_workers) as executor:
                 for symbol, trend_status, pct_from_ma50, pct_from_ma200 in executor.map(
                     _compute_trend_for_ticker,
                     trend_targets.keys(),
@@ -800,6 +863,8 @@ if not option_types_to_load:
 
 include_earnings = st.sidebar.checkbox("Incluir Earnings", value=True, key="k_include_earnings")
 include_trend = st.sidebar.checkbox("Incluir Trend Status (SMA50/SMA200)", value=True, key="k_include_trend")
+quick_trend = st.sidebar.toggle("Quick Trend (top N)", value=True, key="k_quick_trend")
+quick_trend_n = st.sidebar.number_input("Quick Trend N", 20, 1000, 120, 10, key="k_quick_trend_n")
 
 # Preset
 st.sidebar.header("Preset")
@@ -851,9 +916,7 @@ if include_trend:
         default=st.session_state.get("k_trend", ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"]),
         key="k_trend",
     )
-workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 20, key="k_workers")
-quick_mode = st.sidebar.toggle("Quick mode", value=False, key="k_quick_mode")
-quick_n = st.sidebar.number_input("Quick mode top N", 10, 1000, 100, 10, key="k_quick_n")
+workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 30, key="k_workers")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
     progress_bar = st.progress(0)
@@ -882,6 +945,8 @@ if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_t
         max_workers=workers,
         include_earnings=include_earnings,
         include_trend=include_trend,
+        quick_trend=quick_trend,
+        quick_trend_n=int(quick_trend_n),
         progress_callback=mark_stage,
     )
     mark_stage("Building results table", 0.98)
@@ -953,22 +1018,14 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
         cols_to_show = [c for c in cols_to_show if c not in ["Trend Status", "Pct from MA50 (%)", "Pct from MA200 (%)"]]
 
     df_view = df.copy()
-    if quick_mode:
-        ranked_idx = df_view.sort_values(["Retorno %"], ascending=False).index
-        full_idx = list(ranked_idx)
-        pending_idx = full_idx[int(quick_n):]
-        if base_include_trend and "Trend Status" in df_view.columns and pending_idx:
-            df_view.loc[pending_idx, ["Trend Status", "Pct from MA50 (%)", "Pct from MA200 (%)"]] = np.nan
-        if base_include_earnings and "Días a Earnings" in df_view.columns and pending_idx:
-            df_view.loc[pending_idx, ["Próximo Earnings", "Días a Earnings", "Earnings antes exp"]] = np.nan
-
     _render_formatted_table(df_view, cols_to_show)
 
     if base_meta:
         st.caption(
             f"Tiempo total: {base_meta.get('total_time', 0):.2f}s | "
             f"Fase A tickers: {base_meta.get('phase_a_tickers', 0)} | "
-            f"Fase B tickers: {base_meta.get('phase_b_tickers', 0)}"
+            f"Fase B tickers: {base_meta.get('phase_b_tickers', 0)} | "
+            f"Trend tickers: {base_meta.get('trend_tickers', 0)}"
         )
         st.json({k: round(v, 2) for k, v in base_meta.get("stage_times", {}).items()})
 
