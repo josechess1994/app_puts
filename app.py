@@ -144,6 +144,7 @@ def obtener_cambio_periodo(ticker, period="1mo"):
         return None
 
 @st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def obtener_proximo_earnings(ticker):
     try:
         ed = yf.Ticker(ticker).get_earnings_dates(limit=4)
@@ -215,6 +216,9 @@ def get_quotes_batch(symbols_tuple):
         return {}
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def get_daily_closes(symbol, lookback_days=400, _today=None):
+    try:
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_daily_closes(symbol, lookback_days=400, _today=None):
     try:
         end = _today or datetime.now().date()
@@ -309,6 +313,8 @@ def procesar_ticker(
         trend_status, pct_from_ma50, pct_from_ma200 = get_trend_status_cached(ticker, last, _today=today)
     else:
         trend_status, pct_from_ma50, pct_from_ma200 = None, None, None
+    prox_earnings = obtener_proximo_earnings(ticker)
+    trend_status, pct_from_ma50, pct_from_ma200 = get_trend_status_cached(ticker, last, _today=today)
 
     expirations = get_expirations(ticker)
     valid = []
@@ -390,6 +396,31 @@ def procesar_ticker(
             row["Pct from MA50 (%)"] = pct_from_ma50 if include_trend else None
             row["Pct from MA200 (%)"] = pct_from_ma200 if include_trend else None
             registros.append(row)
+            registros.append(
+                {
+                    "Ticker": ticker,
+                    "Expiración": exp,
+                    "OptionType": otype,
+                    "Dias": dias,
+                    "Strike": strike,
+                    "Mid": round(mid, 4),
+                    "Retorno %": round(ret, 2),
+                    "Delta": round(delta or 0, 3),
+                    "POP (%)": _pop_from_delta(delta),
+                    "IV (%)": round(iv_pct, 2) if iv_pct is not None else None,
+                    "IV Rank": ivr,
+                    "Cambio 1M (%)": cambio_1m,
+                    "Cambio 2M (%)": cambio_2m,
+                    "Cambio 3M (%)": cambio_3m,
+                    "Cambio 6M (%)": cambio_6m,
+                    "Próximo Earnings": prox_earnings.strftime("%Y-%m-%d") if prox_earnings else None,
+                    "Días a Earnings": dias_a_earnings,
+                    "Earnings antes exp": "Sí" if earnings_en_ciclo else "No",
+                    "Trend Status": trend_status,
+                    "Pct from MA50 (%)": pct_from_ma50,
+                    "Pct from MA200 (%)": pct_from_ma200,
+                }
+            )
     return registros
 
 def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range, include_earnings, include_trend, quote_data):
@@ -764,6 +795,13 @@ if include_trend:
     )
 else:
     r_trend = []
+r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
+r_trend = st.sidebar.multiselect(
+    "Trend Status",
+    ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"],
+    default=st.session_state.get("k_trend", ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"]),
+    key="k_trend",
+)
 workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 20, key="k_workers")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
