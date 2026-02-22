@@ -275,6 +275,7 @@ def procesar_ticker(
     cambio_1m = obtener_cambio_periodo(ticker, "1mo")
     cambio_2m = obtener_cambio_periodo(ticker, "2mo")
     cambio_3m = obtener_cambio_periodo(ticker, "3mo")
+    cambio_6m = obtener_cambio_periodo(ticker, "6mo")
     today = datetime.now().date()
     prox_earnings = obtener_proximo_earnings(ticker)
     trend_status, pct_from_ma50, pct_from_ma200 = get_trend_status_cached(ticker, last, _today=today)
@@ -351,6 +352,7 @@ def procesar_ticker(
                     "Cambio 1M (%)": cambio_1m,
                     "Cambio 2M (%)": cambio_2m,
                     "Cambio 3M (%)": cambio_3m,
+                    "Cambio 6M (%)": cambio_6m,
                     "Próximo Earnings": prox_earnings.strftime("%Y-%m-%d") if prox_earnings else None,
                     "Días a Earnings": dias_a_earnings,
                     "Earnings antes exp": "Sí" if earnings_en_ciclo else "No",
@@ -411,6 +413,7 @@ def put_credit_spread(df, width_range, delta_range, credit_range):
                         "Cambio 1M (%)": s["Cambio 1M (%)"],
                         "Cambio 2M (%)": s["Cambio 2M (%)"],
                         "Cambio 3M (%)": s["Cambio 3M (%)"],
+                        "Cambio 6M (%)": s["Cambio 6M (%)"],
                         "Próximo Earnings": s["Próximo Earnings"],
                         "Días a Earnings": s["Días a Earnings"],
                         "Earnings antes exp": s["Earnings antes exp"],
@@ -450,6 +453,7 @@ def bear_call_spread(df, width_range, delta_range, credit_range):
                         "Cambio 1M (%)": s["Cambio 1M (%)"],
                         "Cambio 2M (%)": s["Cambio 2M (%)"],
                         "Cambio 3M (%)": s["Cambio 3M (%)"],
+                        "Cambio 6M (%)": s["Cambio 6M (%)"],
                         "Próximo Earnings": s["Próximo Earnings"],
                         "Días a Earnings": s["Días a Earnings"],
                         "Earnings antes exp": s["Earnings antes exp"],
@@ -492,6 +496,7 @@ def iron_condor(df, w_put_range, d_put_range, w_call_range, d_call_range, credit
                     "Cambio 1M (%)": p["Cambio 1M (%)"],
                     "Cambio 2M (%)": p["Cambio 2M (%)"],
                     "Cambio 3M (%)": p["Cambio 3M (%)"],
+                    "Cambio 6M (%)": p["Cambio 6M (%)"],
                     "Próximo Earnings": p["Próximo Earnings"],
                     "Días a Earnings": p["Días a Earnings"],
                     "Earnings antes exp": p["Earnings antes exp"],
@@ -535,6 +540,7 @@ def iron_fly(df, width_range, delta_range, credit_range):
                         "Cambio 1M (%)": s["Cambio 1M (%)"],
                         "Cambio 2M (%)": s["Cambio 2M (%)"],
                         "Cambio 3M (%)": s["Cambio 3M (%)"],
+                        "Cambio 6M (%)": s["Cambio 6M (%)"],
                         "Próximo Earnings": s["Próximo Earnings"],
                         "Días a Earnings": s["Días a Earnings"],
                         "Earnings antes exp": s["Earnings antes exp"],
@@ -577,6 +583,7 @@ def jade_lizard(df, w_call_range, d_put_range, d_call_range, credit_range):
                             "Cambio 1M (%)": p["Cambio 1M (%)"],
                             "Cambio 2M (%)": p["Cambio 2M (%)"],
                             "Cambio 3M (%)": p["Cambio 3M (%)"],
+                            "Cambio 6M (%)": p["Cambio 6M (%)"],
                             "Próximo Earnings": p["Próximo Earnings"],
                             "Días a Earnings": p["Días a Earnings"],
                             "Earnings antes exp": p["Earnings antes exp"],
@@ -630,6 +637,7 @@ if st.sidebar.button("Preset (20–45 DTE, Δ −0.30 a +0.30, IV ≥ 25%, IVR �
     st.session_state["k_ch"] = (-100.0, 100.0)
     st.session_state["k_ch_2m"] = (-100.0, 100.0)
     st.session_state["k_ch_3m"] = (-100.0, 100.0)
+    st.session_state["k_ch_6m"] = (-100.0, 100.0)
     st.rerun()
 
 horizon_presets = {
@@ -657,6 +665,7 @@ r_ir = st.sidebar.slider("IV Rank", 0.0, 100.0, st.session_state.get("k_ivr", (0
 r_ch = st.sidebar.slider("Cambio 1M (%)", -100.0, 100.0, st.session_state.get("k_ch", (-100.0, 100.0)), key="k_ch")
 r_ch_2m = st.sidebar.slider("Cambio 2M (%)", -100.0, 100.0, st.session_state.get("k_ch_2m", (-100.0, 100.0)), key="k_ch_2m")
 r_ch_3m = st.sidebar.slider("Cambio 3M (%)", -100.0, 100.0, st.session_state.get("k_ch_3m", (-100.0, 100.0)), key="k_ch_3m")
+r_ch_6m = st.sidebar.slider("Cambio 6M (%)", -100.0, 100.0, st.session_state.get("k_ch_6m", (-100.0, 100.0)), key="k_ch_6m")
 r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
 r_trend = st.sidebar.multiselect(
     "Trend Status",
@@ -710,6 +719,7 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
         & base["Cambio 1M (%)"].between(r_ch[0], r_ch[1])
         & base["Cambio 2M (%)"].between(r_ch_2m[0], r_ch_2m[1])
         & base["Cambio 3M (%)"].between(r_ch_3m[0], r_ch_3m[1])
+        & base["Cambio 6M (%)"].between(r_ch_6m[0], r_ch_6m[1])
         & mask_earnings
         & mask_trend
     ]
