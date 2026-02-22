@@ -1,5 +1,6 @@
 
 import os
+import time
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -142,7 +143,7 @@ def obtener_cambio_periodo(ticker, period="1mo"):
     except Exception:
         return None
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def obtener_proximo_earnings(ticker):
     try:
         ed = yf.Ticker(ticker).get_earnings_dates(limit=4)
@@ -190,7 +191,20 @@ def get_quote(symbol):
     except Exception:
         return {}
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
+def get_quotes_batch(symbols):
+    if not symbols:
+        return {}
+    try:
+        r = SESSION.get(f"{BASE_URL}/markets/quotes", params={"symbols": ",".join(symbols)}, timeout=12)
+        data = r.json().get("quotes", {}).get("quote")
+        if isinstance(data, dict):
+            data = [data]
+        return {q.get("symbol"): q for q in (data or []) if isinstance(q, dict) and q.get("symbol")}
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_daily_closes(symbol, lookback_days=400, _today=None):
     try:
         end = _today or datetime.now().date()
@@ -264,9 +278,13 @@ def procesar_ticker(
     dias_range=(1, 60),
     max_expirations=0,
     atm_window_range=(0, 100),
+    include_earnings=True,
+    include_trend=True,
+    quote_data=None,
+    valid_expirations=None,
 ):
     registros = []
-    q = get_quote(ticker)
+    q = quote_data or get_quote(ticker)
     last = q.get("last")
     if last is None:
         return registros
@@ -277,20 +295,24 @@ def procesar_ticker(
     cambio_3m = obtener_cambio_periodo(ticker, "3mo")
     cambio_6m = obtener_cambio_periodo(ticker, "6mo")
     today = datetime.now().date()
-    prox_earnings = obtener_proximo_earnings(ticker)
-    trend_status, pct_from_ma50, pct_from_ma200 = get_trend_status_cached(ticker, last, _today=today)
+    prox_earnings = obtener_proximo_earnings(ticker) if include_earnings else None
+    if include_trend:
+        trend_status, pct_from_ma50, pct_from_ma200 = get_trend_status_cached(ticker, last, _today=today)
+    else:
+        trend_status, pct_from_ma50, pct_from_ma200 = None, None, None
 
-    expirations = get_expirations(ticker)
-    valid = []
-    for exp in expirations:
-        try:
-            dias = (datetime.strptime(exp, "%Y-%m-%d") - datetime.now()).days
-        except Exception:
-            continue
-        if dias <= 0:
-            continue
-        if dias_range[0] <= dias <= dias_range[1]:
-            valid.append((exp, dias))
+    valid = list(valid_expirations or [])
+    if not valid:
+        expirations = get_expirations(ticker)
+        for exp in expirations:
+            try:
+                dias = (datetime.strptime(exp, "%Y-%m-%d") - datetime.now()).days
+            except Exception:
+                continue
+            if dias <= 0:
+                continue
+            if dias_range[0] <= dias <= dias_range[1]:
+                valid.append((exp, dias))
     valid.sort(key=lambda x: x[1])
     if max_expirations and max_expirations > 0:
         valid = valid[:max_expirations]
@@ -363,26 +385,90 @@ def procesar_ticker(
             )
     return registros
 
-def procesar_ticker_safe(ticker, option_types, dias_range, max_expirations, atm_window_range):
+def procesar_ticker_safe(args):
     try:
-        return procesar_ticker(ticker, option_types, dias_range, max_expirations, atm_window_range)
+        return procesar_ticker(*args)
     except Exception:
-        # Si algo raro pasa en un ticker, seguimos con los demás
         return []
 
-def cargar_base(tickers, option_types, dias_range, max_expirations, atm_window_range, max_workers=20):
+def _valid_expirations_for_ticker(ticker, dias_range, max_expirations):
+    valid = []
+    for exp in get_expirations(ticker):
+        try:
+            dias = (datetime.strptime(exp, "%Y-%m-%d") - datetime.now()).days
+        except Exception:
+            continue
+        if dias <= 0:
+            continue
+        if dias_range[0] <= dias <= dias_range[1]:
+            valid.append((exp, dias))
+    valid.sort(key=lambda x: x[1])
+    if max_expirations and max_expirations > 0:
+        valid = valid[:max_expirations]
+    return ticker, valid
+
+def cargar_base(
+    tickers,
+    option_types,
+    dias_range,
+    max_expirations,
+    atm_window_range,
+    max_workers=20,
+    include_earnings=True,
+    include_trend=True,
+    progress_callback=None,
+):
     all_regs = []
+    stage_stats = {"phase_a_tickers": len(tickers), "phase_b_tickers": 0}
+
+    if progress_callback:
+        progress_callback("Fetching quotes", 0.25)
+
+    quotes_map = {}
+    for i in range(0, len(tickers), 200):
+        chunk = tickers[i:i + 200]
+        quotes_map.update(get_quotes_batch(chunk))
+
+    if progress_callback:
+        progress_callback("Applying base filters", 0.45)
+
+    tickers_with_quotes = [t for t in tickers if (quotes_map.get(t, {}) or {}).get("last") is not None]
+    exp_map = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for regs in executor.map(
-            procesar_ticker_safe,
-            tickers,
-            repeat(tuple(option_types)),
-            repeat(tuple(dias_range)),
-            repeat(max_expirations),
-            repeat(tuple(atm_window_range)),
-        ):
+        for t, valid in executor.map(_valid_expirations_for_ticker, tickers_with_quotes, repeat(tuple(dias_range)), repeat(max_expirations)):
+            if valid:
+                exp_map[t] = valid
+
+    phase_b_tickers = list(exp_map.keys())
+    stage_stats["phase_b_tickers"] = len(phase_b_tickers)
+
+    if progress_callback:
+        progress_callback("Fetching options chains", 0.65)
+    if include_earnings and progress_callback:
+        progress_callback("Computing earnings", 0.78)
+    if include_trend and progress_callback:
+        progress_callback("Computing trend status", 0.88)
+
+    ticker_args = [
+        (
+            t,
+            tuple(option_types),
+            tuple(dias_range),
+            max_expirations,
+            tuple(atm_window_range),
+            include_earnings,
+            include_trend,
+            quotes_map.get(t),
+            exp_map.get(t),
+        )
+        for t in phase_b_tickers
+    ]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for regs in executor.map(procesar_ticker_safe, ticker_args):
             all_regs.extend(regs)
-    return pd.DataFrame(all_regs)
+
+    return pd.DataFrame(all_regs), stage_stats
 
 # =========================
 # ESTRATEGIAS (igual que antes)
@@ -627,6 +713,9 @@ option_types_to_load = st.sidebar.multiselect(
 if not option_types_to_load:
     st.sidebar.warning("Selecciona al menos un tipo (put/call) para cargar.")
 
+include_earnings = st.sidebar.checkbox("Incluir Earnings", value=True, key="k_include_earnings")
+include_trend = st.sidebar.checkbox("Incluir Trend Status (SMA50/SMA200)", value=True, key="k_include_trend")
+
 # Preset
 st.sidebar.header("Preset")
 if st.sidebar.button("Preset (20–45 DTE, Δ −0.30 a +0.30, IV ≥ 25%, IVR ≥ 30%)"):
@@ -666,28 +755,67 @@ r_ch = st.sidebar.slider("Cambio 1M (%)", -100.0, 100.0, st.session_state.get("k
 r_ch_2m = st.sidebar.slider("Cambio 2M (%)", -100.0, 100.0, st.session_state.get("k_ch_2m", (-100.0, 100.0)), key="k_ch_2m")
 r_ch_3m = st.sidebar.slider("Cambio 3M (%)", -100.0, 100.0, st.session_state.get("k_ch_3m", (-100.0, 100.0)), key="k_ch_3m")
 r_ch_6m = st.sidebar.slider("Cambio 6M (%)", -100.0, 100.0, st.session_state.get("k_ch_6m", (-100.0, 100.0)), key="k_ch_6m")
-r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
-r_trend = st.sidebar.multiselect(
-    "Trend Status",
-    ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"],
-    default=st.session_state.get("k_trend", ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"]),
-    key="k_trend",
-)
+r_earnings = "Todos"
+if include_earnings:
+    r_earnings = st.sidebar.selectbox("Earnings antes de expiración", ["Todos", "Solo con earnings", "Solo sin earnings"], key="k_earnings")
+r_trend = ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"]
+if include_trend:
+    r_trend = st.sidebar.multiselect(
+        "Trend Status",
+        ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"],
+        default=st.session_state.get("k_trend", ["STRONG_UPTREND", "PULLBACK", "TRANSITION", "DOWNTREND"]),
+        key="k_trend",
+    )
 workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 20, key="k_workers")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
-    with st.spinner(
-        f"Cargando {len(selected_tickers)} tickers, tipos {option_types_to_load}, días {r_dias}, ATM {atm_win}…"
-    ):
-        df_base = cargar_base(
-            selected_tickers,
-            option_types_to_load,
-            r_dias,
-            max_exp,
-            atm_win,
-            max_workers=workers,
-        )
+    progress_bar = st.progress(0)
+    status_line = st.empty()
+    stage_times = {}
+    t0 = time.perf_counter()
+    stage_t0 = [t0]
+
+    def mark_stage(stage, pct):
+        now = time.perf_counter()
+        prev_stage = st.session_state.get("_last_stage_name")
+        if prev_stage:
+            stage_times[prev_stage] = stage_times.get(prev_stage, 0.0) + (now - stage_t0[0])
+        stage_t0[0] = now
+        st.session_state["_last_stage_name"] = stage
+        progress_bar.progress(int(pct * 100))
+        status_line.write(f"⏳ {stage}")
+
+    mark_stage("Loading tickers", 0.1)
+    df_base, stage_stats = cargar_base(
+        selected_tickers,
+        option_types_to_load,
+        r_dias,
+        max_exp,
+        atm_win,
+        max_workers=workers,
+        include_earnings=include_earnings,
+        include_trend=include_trend,
+        progress_callback=mark_stage,
+    )
+    mark_stage("Building results table", 0.98)
+
+    last_stage = st.session_state.get("_last_stage_name")
+    if last_stage:
+        stage_times[last_stage] = stage_times.get(last_stage, 0.0) + (time.perf_counter() - stage_t0[0])
+    st.session_state.pop("_last_stage_name", None)
+
+    total_time = time.perf_counter() - t0
+    progress_bar.progress(100)
+    status_line.write("✅ Completado")
+
     st.session_state["base_df"] = df_base
+    st.session_state["base_meta"] = {
+        "include_earnings": include_earnings,
+        "include_trend": include_trend,
+        "stage_times": stage_times,
+        "total_time": total_time,
+        **stage_stats,
+    }
     st.success(f"Base cargada: {len(df_base)} contratos")
 
 # 2) Mostrar/filtrar base
@@ -699,14 +827,18 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
         "Tipos a mostrar", ["put", "call"], default=tipos_vista if tipos_vista else ["put", "call"], key="k_types_view"
     )
 
+    base_meta = st.session_state.get("base_meta", {})
+    base_include_earnings = base_meta.get("include_earnings", True)
+    base_include_trend = base_meta.get("include_trend", True)
+
     mask_earnings = pd.Series(True, index=base.index)
-    if r_earnings == "Solo con earnings":
+    if base_include_earnings and r_earnings == "Solo con earnings":
         mask_earnings = base["Earnings antes exp"] == "Sí"
-    elif r_earnings == "Solo sin earnings":
+    elif base_include_earnings and r_earnings == "Solo sin earnings":
         mask_earnings = base["Earnings antes exp"] == "No"
 
     mask_trend = pd.Series(True, index=base.index)
-    if r_trend:
+    if base_include_trend and r_trend:
         mask_trend = base["Trend Status"].isin(r_trend)
 
     df = base[
@@ -725,7 +857,21 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
     ]
 
     st.subheader(f"🔖 Base filtrada: {len(df)} contratos")
-    st.dataframe(df, use_container_width=True)
+
+    cols_to_show = df.columns.tolist()
+    if not base_include_earnings:
+        cols_to_show = [c for c in cols_to_show if c not in ["Próximo Earnings", "Días a Earnings", "Earnings antes exp"]]
+    if not base_include_trend:
+        cols_to_show = [c for c in cols_to_show if c not in ["Trend Status", "Pct from MA50 (%)", "Pct from MA200 (%)"]]
+    st.dataframe(df[cols_to_show], use_container_width=True)
+
+    if base_meta:
+        st.caption(
+            f"Tiempo total: {base_meta.get('total_time', 0):.2f}s | "
+            f"Fase A tickers: {base_meta.get('phase_a_tickers', 0)} | "
+            f"Fase B tickers: {base_meta.get('phase_b_tickers', 0)}"
+        )
+        st.json({k: round(v, 2) for k, v in base_meta.get("stage_times", {}).items()})
 
     # 3) Estrategias
     st.sidebar.header("2. Estrategias")
