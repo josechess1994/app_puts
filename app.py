@@ -228,7 +228,7 @@ def get_daily_closes(symbol, lookback_days=400, _today=None):
         return []
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_trend_closes_cached(symbol, _today=None):
     return get_daily_closes(symbol, _today=_today)
 
@@ -854,6 +854,12 @@ if include_trend:
 workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 20, key="k_workers")
 quick_mode = st.sidebar.toggle("Quick mode", value=False, key="k_quick_mode")
 quick_n = st.sidebar.number_input("Quick mode top N", 10, 1000, 100, 10, key="k_quick_n")
+compute_trend = st.sidebar.toggle("Compute Trend", value=False, key="k_compute_trend")
+trend_top_n = None
+compute_trend_now = False
+if compute_trend:
+    trend_top_n = st.sidebar.number_input("Trend Top N", 10, 1000, 120, 10, key="k_trend_top_n")
+    compute_trend_now = st.sidebar.button("Compute Trend Now")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
     progress_bar = st.progress(0)
@@ -881,7 +887,7 @@ if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_t
         atm_win,
         max_workers=workers,
         include_earnings=include_earnings,
-        include_trend=include_trend,
+        include_trend=False,
         progress_callback=mark_stage,
     )
     mark_stage("Building results table", 0.98)
@@ -963,6 +969,36 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
             df_view.loc[pending_idx, ["Próximo Earnings", "Días a Earnings", "Earnings antes exp"]] = np.nan
 
     _render_formatted_table(df_view, cols_to_show)
+
+    if compute_trend and compute_trend_now and base_include_trend and not df.empty:
+        trend_source = df_view if "df_view" in locals() else df
+        trend_slice = trend_source.sort_values(["Retorno %"], ascending=False).head(int(trend_top_n))
+        if not trend_slice.empty:
+            today = datetime.now().date()
+            trend_targets = trend_slice[["Ticker"]].drop_duplicates()
+            trend_targets["_price"] = trend_targets["Ticker"].map(
+                lambda t: (get_quote(t) or {}).get("last")
+            )
+            trend_targets = trend_targets[trend_targets["_price"].notna()]
+            trend_map = {}
+            if not trend_targets.empty:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                    for symbol, trend_status, pct_from_ma50, pct_from_ma200 in executor.map(
+                        _compute_trend_for_ticker,
+                        trend_targets["Ticker"].tolist(),
+                        trend_targets["_price"].tolist(),
+                        repeat(today),
+                    ):
+                        trend_map[symbol] = (trend_status, pct_from_ma50, pct_from_ma200)
+
+            if trend_map:
+                base_df = st.session_state["base_df"]
+                ticker_mask = base_df["Ticker"].isin(trend_targets["Ticker"].tolist())
+                for symbol, trend_vals in trend_map.items():
+                    symbol_mask = ticker_mask & (base_df["Ticker"] == symbol)
+                    base_df.loc[symbol_mask, ["Trend Status", "Pct from MA50 (%)", "Pct from MA200 (%)"]] = trend_vals
+                st.session_state["base_df"] = base_df
+            st.rerun()
 
     if base_meta:
         st.caption(
