@@ -274,6 +274,66 @@ def _compute_trend_for_ticker(symbol, price, today):
     trend_status, pct_from_ma50, pct_from_ma200 = calcular_trend_status(price, closes)
     return symbol, trend_status, pct_from_ma50, pct_from_ma200
 
+
+TREND_BADGE = {
+    "STRONG_UPTREND": "🟢 STRONG_UPTREND",
+    "PULLBACK": "🟡 PULLBACK",
+    "TRANSITION": "🟠 TRANSITION",
+    "DOWNTREND": "🔴 DOWNTREND",
+}
+
+
+def _earnings_pill(days_to_earnings):
+    if pd.isna(days_to_earnings):
+        return "⚪ Unknown"
+    days = int(days_to_earnings)
+    if days > 21:
+        return f"🟢 Earnings in {days}d"
+    if days >= 7:
+        return f"🟡 Earnings in {days}d"
+    return f"🔴 Earnings in {days}d"
+
+
+def _render_active_filters_summary(r_dias, r_dlt, r_iv, r_ir, sel_horizon, r_earnings, r_trend, option_types_to_load):
+    chips = [
+        f"DTE: {r_dias[0]}–{r_dias[1]}",
+        f"Delta: {r_dlt[0]:.2f} to {r_dlt[1]:.2f}",
+        f"IV min: {r_iv[0]:.1f}%",
+        f"IVR min: {r_ir[0]:.1f}",
+        f"Horizon: {sel_horizon}",
+        f"Earnings: {r_earnings}",
+        f"Trend: {'ON' if r_trend else 'OFF'}",
+        f"Ops: {', '.join(option_types_to_load)}",
+    ]
+    st.markdown("### 🎛️ Active Filters Summary")
+    st.caption(" • ".join(chips))
+
+
+def _render_formatted_table(df, cols_to_show):
+    to_show = df[cols_to_show].copy()
+
+    if "Trend Status" in to_show.columns:
+        to_show["Trend Badge"] = to_show["Trend Status"].map(TREND_BADGE).fillna("⚪ Pending")
+    if "Días a Earnings" in to_show.columns:
+        to_show["Earnings Pill"] = to_show["Días a Earnings"].apply(_earnings_pill)
+
+    if "Ticker" in to_show.columns:
+        ordered = ["Ticker"] + [c for c in to_show.columns if c != "Ticker"]
+        to_show = to_show[ordered]
+
+    percent_like = [c for c in to_show.columns if "%" in c and pd.api.types.is_numeric_dtype(to_show[c])]
+    money_like = [c for c in ["Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
+
+    config = {
+        c: st.column_config.NumberColumn(format="%.1f%%") for c in percent_like
+    }
+    for c in money_like:
+        config[c] = st.column_config.NumberColumn(format="$%.2f")
+    if "Dias" in to_show.columns:
+        config["Dias"] = st.column_config.NumberColumn(format="%d")
+
+    st.dataframe(to_show, use_container_width=True, hide_index=True, column_config=config)
+
 # =========================
 # CONSTRUCCIÓN DE BASE
 # =========================
@@ -792,6 +852,8 @@ if include_trend:
         key="k_trend",
     )
 workers = st.sidebar.number_input("Hilos (workers)", 2, 50, 20, key="k_workers")
+quick_mode = st.sidebar.toggle("Quick mode", value=False, key="k_quick_mode")
+quick_n = st.sidebar.number_input("Quick mode top N", 10, 1000, 100, 10, key="k_quick_n")
 
 if st.sidebar.button("🔄 Cargar base") and option_types_to_load and selected_tickers:
     progress_bar = st.progress(0)
@@ -882,13 +944,25 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
     ]
 
     st.subheader(f"🔖 Base filtrada: {len(df)} contratos")
+    _render_active_filters_summary(r_dias, r_dlt, r_iv, r_ir, sel_horizon, r_earnings, r_trend, option_types_to_load)
 
     cols_to_show = df.columns.tolist()
     if not base_include_earnings:
         cols_to_show = [c for c in cols_to_show if c not in ["Próximo Earnings", "Días a Earnings", "Earnings antes exp"]]
     if not base_include_trend:
         cols_to_show = [c for c in cols_to_show if c not in ["Trend Status", "Pct from MA50 (%)", "Pct from MA200 (%)"]]
-    st.dataframe(df[cols_to_show], use_container_width=True)
+
+    df_view = df.copy()
+    if quick_mode:
+        ranked_idx = df_view.sort_values(["Retorno %"], ascending=False).index
+        full_idx = list(ranked_idx)
+        pending_idx = full_idx[int(quick_n):]
+        if base_include_trend and "Trend Status" in df_view.columns and pending_idx:
+            df_view.loc[pending_idx, ["Trend Status", "Pct from MA50 (%)", "Pct from MA200 (%)"]] = np.nan
+        if base_include_earnings and "Días a Earnings" in df_view.columns and pending_idx:
+            df_view.loc[pending_idx, ["Próximo Earnings", "Días a Earnings", "Earnings antes exp"]] = np.nan
+
+    _render_formatted_table(df_view, cols_to_show)
 
     if base_meta:
         st.caption(
@@ -944,7 +1018,7 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
 
     if not out.empty:
         st.subheader(f"📊 {strat}: {len(out)} oportunidades")
-        st.dataframe(out, use_container_width=True)
+        _render_formatted_table(out, out.columns.tolist())
     else:
         st.caption("Ajusta parámetros y pulsa 'Aplicar estrategia' para ver resultados.")
 else:
