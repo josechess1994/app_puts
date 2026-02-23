@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import requests
 import concurrent.futures
+import unicodedata
 from itertools import repeat
 from datetime import datetime, timedelta
 from datetime import datetime
@@ -309,7 +310,12 @@ def _render_active_filters_summary(r_dias, r_dlt, r_iv, r_ir, sel_horizon, r_ear
     st.caption(" • ".join(chips))
 
 
-def _render_formatted_table(df, cols_to_show):
+def _normalize_col_name(name):
+    normalized = unicodedata.normalize("NFKD", str(name))
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower()
+
+
+def _render_formatted_table(df, cols_to_show, simple_view=False):
     to_show = df[cols_to_show].copy()
 
     if "Premium Edge" in to_show.columns:
@@ -346,6 +352,26 @@ def _render_formatted_table(df, cols_to_show):
     if "Ticker" in to_show.columns:
         ordered = ["Ticker"] + [c for c in to_show.columns if c != "Ticker"]
         to_show = to_show[ordered]
+
+    if simple_view:
+        normalized_map = {c: _normalize_col_name(c) for c in to_show.columns}
+        drop_cols = []
+
+        for col, norm in normalized_map.items():
+            if "trend status" in norm or "pct from ma50" in norm or "pct from ma200" in norm:
+                drop_cols.append(col)
+
+        has_earnings_pill = any("earnings pill" in n for n in normalized_map.values())
+        if has_earnings_pill:
+            for col, norm in normalized_map.items():
+                if "earnings pill" in norm:
+                    continue
+                if "dias a earnings" in norm or "earnings antes" in norm or "earnings" in norm:
+                    drop_cols.append(col)
+
+        if drop_cols:
+            drop_set = set(drop_cols)
+            to_show = to_show[[c for c in to_show.columns if c not in drop_set]]
 
     percent_like = [c for c in to_show.columns if "%" in c and pd.api.types.is_numeric_dtype(to_show[c])]
     money_like = [c for c in ["Price", "Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
@@ -847,6 +873,7 @@ if not option_types_to_load:
 
 include_earnings = st.sidebar.checkbox("Incluir Earnings", value=True, key="k_include_earnings")
 include_trend = st.sidebar.checkbox("Incluir Trend Status (SMA50/SMA200)", value=True, key="k_include_trend")
+results_view = st.sidebar.radio("Results View", ["SIMPLE", "PRO"], index=0, key="k_results_view")
 
 # Preset
 st.sidebar.header("Preset")
@@ -1017,7 +1044,7 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
         if base_include_earnings and "Días a Earnings" in df_view.columns and pending_idx:
             df_view.loc[pending_idx, ["Próximo Earnings", "Días a Earnings", "Earnings antes exp"]] = np.nan
 
-    _render_formatted_table(df_view, cols_to_show)
+    _render_formatted_table(df_view, cols_to_show, simple_view=(results_view == "SIMPLE"))
 
     if compute_trend and compute_trend_now and base_include_trend and not df.empty:
         trend_source = df_view if "df_view" in locals() else df
