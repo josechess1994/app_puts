@@ -324,6 +324,20 @@ def _render_formatted_table(df, cols_to_show):
 
         to_show["Premium Edge"] = to_show["Premium Edge"].apply(_premium_edge_badge)
 
+    if "EM Coverage (%)" in to_show.columns:
+        def _em_coverage_badge(v):
+            if pd.isna(v):
+                return "⚪ N/A"
+            if v > 130:
+                return f"🟢 {v:.1f}%"
+            if v >= 100:
+                return f"🟡 {v:.1f}%"
+            if v >= 70:
+                return f"⚪ {v:.1f}%"
+            return f"🔴 {v:.1f}%"
+
+        to_show["EM Coverage (%)"] = to_show["EM Coverage (%)"].apply(_em_coverage_badge)
+
     if "Trend Status" in to_show.columns:
         to_show["Trend Badge"] = to_show["Trend Status"].map(TREND_BADGE).fillna("⚪ Pending")
     if "Días a Earnings" in to_show.columns:
@@ -334,7 +348,7 @@ def _render_formatted_table(df, cols_to_show):
         to_show = to_show[ordered]
 
     percent_like = [c for c in to_show.columns if "%" in c and pd.api.types.is_numeric_dtype(to_show[c])]
-    money_like = [c for c in ["Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
+    money_like = [c for c in ["Price", "Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
 
     config = {
         c: st.column_config.NumberColumn(format="%.1f%%") for c in percent_like
@@ -345,6 +359,8 @@ def _render_formatted_table(df, cols_to_show):
         config["Dias"] = st.column_config.NumberColumn(format="%d")
     if "Premium Edge" in to_show.columns:
         config["Premium Edge"] = st.column_config.TextColumn()
+    if "EM Coverage (%)" in to_show.columns:
+        config["EM Coverage (%)"] = st.column_config.TextColumn(label="EM Coverage (%)")
 
     st.dataframe(to_show, use_container_width=True, hide_index=True, column_config=config)
 
@@ -444,10 +460,12 @@ def procesar_ticker(
             expected_move_percent = (expected_move_dollar / last * 100) if expected_move_dollar is not None and last else None
             real_move_dollar = (last * real_move_daily_std * np.sqrt(max(dias, 1))) if real_move_daily_std is not None else None
             premium_edge = (expected_move_dollar / real_move_dollar) if expected_move_dollar is not None and real_move_dollar not in (None, 0) else None
+            em_coverage = ((last - strike) / expected_move_dollar) if otype == "put" and expected_move_dollar not in (None, 0) else None
 
             registros.append(
                 {
                     "Ticker": ticker,
+                    "Price": round(last, 4),
                     "Expiración": exp,
                     "OptionType": otype,
                     "Dias": dias,
@@ -455,6 +473,7 @@ def procesar_ticker(
                     "Mid": round(mid, 4),
                     "Expected Move ($)": round(expected_move_dollar, 4) if expected_move_dollar is not None else None,
                     "Expected Move (%)": round(expected_move_percent, 2) if expected_move_percent is not None else None,
+                    "EM Coverage (%)": round(em_coverage * 100, 1) if em_coverage is not None else None,
                     "Premium Edge": round(premium_edge, 2) if premium_edge is not None else None,
                     "Retorno %": round(ret, 2),
                     "Delta": round(delta or 0, 3),
