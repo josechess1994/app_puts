@@ -315,8 +315,117 @@ def _normalize_col_name(name):
     return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower()
 
 
+def _score_em_coverage(em_coverage_pct):
+    if pd.isna(em_coverage_pct):
+        return None
+    c = float(em_coverage_pct) / 100.0
+    if c < 0.70:
+        return 0.0
+    if c > 1.80:
+        return 0.15
+    score = float(np.exp(-((c - 1.20) / 0.35) ** 2))
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def _score_delta(delta):
+    if pd.isna(delta):
+        return None
+    d = abs(float(delta))
+    score = float(np.exp(-((d - 0.20) / 0.10) ** 2))
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def _score_premium_edge(premium_edge):
+    if pd.isna(premium_edge):
+        return None
+    pe = float(premium_edge)
+    if pe < 1.0:
+        return 0.20
+    if pe < 1.2:
+        return 0.40
+    if pe < 1.5:
+        return 0.70
+    if pe <= 2.0:
+        return 1.00
+    return 0.90
+
+
+def _score_iv_rank(ivr):
+    if pd.isna(ivr):
+        return None
+    return float(np.clip((float(ivr) - 20.0) / 60.0, 0.0, 1.0))
+
+
+def _score_trend(trend_status):
+    if pd.isna(trend_status):
+        return 0.0
+    return {
+        "STRONG_UPTREND": 0.05,
+        "PULLBACK": 0.00,
+        "TRANSITION": 0.00,
+        "DOWNTREND": -0.05,
+    }.get(trend_status, 0.0)
+
+
+def _compute_trade_score_row(row):
+    needed_cols = ["EM Coverage (%)", "Premium Edge", "Delta", "IV Rank"]
+    if any(col not in row.index for col in needed_cols):
+        return None
+
+    score_cov = _score_em_coverage(row.get("EM Coverage (%)"))
+    score_pe = _score_premium_edge(row.get("Premium Edge"))
+    score_delta = _score_delta(row.get("Delta"))
+    score_ivr = _score_iv_rank(row.get("IV Rank"))
+
+    if any(v is None for v in [score_cov, score_pe, score_delta, score_ivr]):
+        return None
+
+    score_raw = (
+        0.35 * score_cov
+        + 0.30 * score_pe
+        + 0.20 * score_delta
+        + 0.10 * score_ivr
+        + 0.05 * _score_trend(row.get("Trend Status"))
+    )
+
+    score_total = float(np.clip(score_raw, 0.0, 1.0))
+    if row.get("Earnings antes exp") == "Sí":
+        score_total *= 0.70
+
+    return int(round(100 * np.clip(score_total, 0.0, 1.0), 0))
+
+
+def _add_trade_score(df):
+    if "Trade Score" in df.columns:
+        return df
+    required = {"EM Coverage (%)", "Premium Edge", "Delta", "IV Rank"}
+    if not required.issubset(set(df.columns)):
+        out = df.copy()
+        out["Trade Score"] = None
+        return out
+
+    out = df.copy()
+    out["Trade Score"] = out.apply(_compute_trade_score_row, axis=1)
+    return out
+
+
 def _render_formatted_table(df, cols_to_show, simple_view=False):
     to_show = df[cols_to_show].copy()
+
+    if "Trade Score" in to_show.columns:
+        def _trade_score_badge(v):
+            if pd.isna(v):
+                return "⚪ N/A"
+            score = int(v)
+            if score >= 85:
+                return f"🟢 {score}"
+            if score >= 70:
+                return f"🟡 {score}"
+            if score >= 55:
+                return f"⚪ {score}"
+            return f"🔴 {score}"
+
+        to_show["Trade Score"] = to_show["Trade Score"].apply(_trade_score_badge)
 
     if "Premium Edge" in to_show.columns:
         def _premium_edge_badge(v):
@@ -387,6 +496,8 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
         config["Premium Edge"] = st.column_config.TextColumn()
     if "EM Coverage (%)" in to_show.columns:
         config["EM Coverage (%)"] = st.column_config.TextColumn(label="EM Coverage (%)")
+    if "Trade Score" in to_show.columns:
+        config["Trade Score"] = st.column_config.TextColumn()
 
     st.dataframe(to_show, use_container_width=True, hide_index=True, column_config=config)
 
@@ -1024,6 +1135,10 @@ if "base_df" in st.session_state and not st.session_state["base_df"].empty:
         & mask_earnings
         & mask_trend
     ]
+
+    df = _add_trade_score(df)
+    if "Trade Score" in df.columns:
+        df = df.sort_values("Trade Score", ascending=False, na_position="last")
 
     st.subheader(f"🔖 Base filtrada: {len(df)} contratos")
     _render_active_filters_summary(r_dias, r_dlt, r_iv, r_ir, sel_horizon, r_earnings, r_trend, option_types_to_load)
