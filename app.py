@@ -30,8 +30,9 @@ def _get_tradier_token():
     return tok
 
 BASE_URL = "https://api.tradier.com/v1"
-TOKEN = "aLvdjAoMpkuiGLVzC1hgaAAGIv9I"
+TOKEN = _get_tradier_token()
 if not TOKEN:
+    print("WARNING: TRADIER_TOKEN is missing from Streamlit secrets and environment variables.")
     st.set_page_config(page_title="Filtro Estrategias Opciones", layout="wide")
     st.error("Falta el token. Añade TRADIER_TOKEN en Settings→Secrets o como variable de entorno.")
     st.stop()
@@ -166,52 +167,79 @@ def obtener_proximo_earnings(ticker):
 # =========================
 # API TRADIER (helpers)
 # =========================
+def _debug_api_response(response):
+    print(f"API STATUS: {response.status_code}")
+    print(f"API HEADERS: {dict(response.headers)}")
+    print(f"API RESPONSE TEXT: {response.text}")
+    if response.status_code in (401, 403):
+        print("ERROR: Unauthorized - API token may be expired.")
+
+
+def _api_get(path, params=None, timeout=10):
+    r = SESSION.get(f"{BASE_URL}{path}", params=params or {}, timeout=timeout)
+    _debug_api_response(r)
+    r.raise_for_status()
+    return r
+
+
+def test_api_connection(symbol="SPY"):
+    print(f"Running API connection diagnostic for symbol={symbol}")
+    try:
+        r = _api_get("/markets/quotes", params={"symbols": symbol}, timeout=10)
+        print(f"API STATUS: {r.status_code}")
+        print(f"API RESPONSE (first 500 chars): {r.text[:500]}")
+        return True
+    except Exception as e:
+        print(f"API diagnostic failed: {e}")
+        return False
+
+
 def get_expirations(symbol):
     try:
-        r = SESSION.get(f"{BASE_URL}/markets/options/expirations", params={"symbol": symbol}, timeout=10)
+        r = _api_get("/markets/options/expirations", params={"symbol": symbol}, timeout=10)
         return r.json().get("expirations", {}).get("date", [])
-    except Exception:
-        return []
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch expirations for {symbol}: {e}") from e
 
 def get_option_chain(symbol, expiration):
     try:
-        r = SESSION.get(
-            f"{BASE_URL}/markets/options/chains",
+        r = _api_get(
+            "/markets/options/chains",
             params={"symbol": symbol, "expiration": expiration, "greeks": "true"},
             timeout=10,
         )
         return r.json().get("options", {}).get("option", [])
-    except Exception:
-        return []
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch option chain for {symbol} {expiration}: {e}") from e
 
 def get_quote(symbol):
     try:
-        r = SESSION.get(f"{BASE_URL}/markets/quotes", params={"symbols": symbol}, timeout=10)
+        r = _api_get("/markets/quotes", params={"symbols": symbol}, timeout=10)
         data = r.json().get("quotes", {}).get("quote")
         return data[0] if isinstance(data, list) else (data or {})
-    except Exception:
-        return {}
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch quote for {symbol}: {e}") from e
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_quotes_batch(symbols):
     if not symbols:
         return {}
     try:
-        r = SESSION.get(f"{BASE_URL}/markets/quotes", params={"symbols": ",".join(symbols)}, timeout=12)
+        r = _api_get("/markets/quotes", params={"symbols": ",".join(symbols)}, timeout=12)
         data = r.json().get("quotes", {}).get("quote")
         if isinstance(data, dict):
             data = [data]
         return {q.get("symbol"): q for q in (data or []) if isinstance(q, dict) and q.get("symbol")}
-    except Exception:
-        return {}
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch quotes batch: {e}") from e
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_daily_closes(symbol, lookback_days=400, _today=None):
     try:
         end = _today or datetime.now().date()
         start = end - timedelta(days=lookback_days)
-        r = SESSION.get(
-            f"{BASE_URL}/markets/history",
+        r = _api_get(
+            "/markets/history",
             params={
                 "symbol": symbol,
                 "interval": "daily",
@@ -225,8 +253,8 @@ def get_daily_closes(symbol, lookback_days=400, _today=None):
             history = [history]
         closes = [float(d.get("close")) for d in history if d.get("close") is not None]
         return closes
-    except Exception:
-        return []
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch daily history for {symbol}: {e}") from e
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -632,10 +660,7 @@ def procesar_ticker(
     return registros
 
 def procesar_ticker_safe(args):
-    try:
-        return procesar_ticker(*args)
-    except Exception:
-        return []
+    return procesar_ticker(*args)
 
 def _valid_expirations_for_ticker(ticker, dias_range, max_expirations):
     valid = []
