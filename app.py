@@ -30,7 +30,7 @@ def _get_tradier_token():
     return tok
 
 BASE_URL = "https://api.tradier.com/v1"
-TOKEN = "aLvdjAoMpkuiGLVzC1hgaAAGIv9I"
+TOKEN = "yWSaceHgZ7aJStfyCYGi3mQVfO0f"
 if not TOKEN:
     st.set_page_config(page_title="Filtro Estrategias Opciones", layout="wide")
     st.error("Falta el token. Añade TRADIER_TOKEN en Settings→Secrets o como variable de entorno.")
