@@ -1,5 +1,4 @@
 
-import os
 import time
 import streamlit as st
 import pandas as pd
@@ -17,23 +16,23 @@ from urllib3.util.retry import Retry
 from functools import lru_cache
 
 # =========================
-# TOKEN SEGURO (secrets / env)
+# TOKEN SEGURO (solo Streamlit secrets)
 # =========================
-def _get_tradier_token():
-    tok = None
+def get_tradier_api_key():
+    token = None
     try:
-        tok = st.secrets.get("TRADIER_TOKEN", None)
+        token = st.secrets.get("TRADIER_TOKEN", None)
     except Exception:
-        pass
-    if not tok:
-        tok = os.getenv("TRADIER_TOKEN")
-    return tok
+        token = None
+    if not token:
+        raise RuntimeError("Falta configurar el secret TRADIER_TOKEN en Streamlit.")
+    return token
 
 BASE_URL = "https://api.tradier.com/v1"
-TOKEN = "yWSaceHgZ7aJStfyCYGi3mQVfO0f"
-if not TOKEN:
-    st.set_page_config(page_title="Filtro Estrategias Opciones", layout="wide")
-    st.error("Falta el token. Añade TRADIER_TOKEN en Settings→Secrets o como variable de entorno.")
+try:
+    TOKEN = get_tradier_api_key()
+except RuntimeError:
+    st.error("Falta configurar Tradier: añade `TRADIER_TOKEN` en Streamlit secrets.")
     st.stop()
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
 
@@ -336,7 +335,10 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
         to_show["Earnings Pill"] = to_show["Días a Earnings"].apply(_earnings_pill)
 
     if "Ticker" in to_show.columns:
-        ordered = ["Ticker"] + [c for c in to_show.columns if c != "Ticker"]
+        ordered = ["Ticker"]
+        if "Precio Acción" in to_show.columns:
+            ordered.append("Precio Acción")
+        ordered += [c for c in to_show.columns if c not in ordered]
         to_show = to_show[ordered]
 
     if simple_view:
@@ -360,7 +362,7 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
             to_show = to_show[[c for c in to_show.columns if c not in drop_set]]
 
     percent_like = [c for c in to_show.columns if "%" in c and pd.api.types.is_numeric_dtype(to_show[c])]
-    money_like = [c for c in ["Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
+    money_like = [c for c in ["Precio Acción", "Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
 
     config = {
         c: st.column_config.NumberColumn(format="%.1f%%") for c in percent_like
@@ -607,7 +609,19 @@ def cargar_base(
                 if trend_vals:
                     reg["Trend Status"], reg["Pct from MA50 (%)"], reg["Pct from MA200 (%)"] = trend_vals
 
-    return pd.DataFrame(all_regs), stage_stats
+    df = pd.DataFrame(all_regs)
+    if not df.empty and "Ticker" in df.columns:
+        precios_df = pd.DataFrame(
+            [
+                {"Ticker": ticker, "Precio Acción": (quote or {}).get("last")}
+                for ticker, quote in quotes_map.items()
+                if (quote or {}).get("last") is not None
+            ]
+        ).drop_duplicates(subset=["Ticker"])
+        if not precios_df.empty:
+            df = df.merge(precios_df, on="Ticker", how="left")
+
+    return df, stage_stats
 
 # =========================
 # ESTRATEGIAS (igual que antes)
@@ -627,6 +641,7 @@ def put_credit_spread(df, width_range, delta_range, credit_range):
                 res.append(
                     {
                         "Ticker": sym,
+                        "Precio Acción": s.get("Precio Acción"),
                         "Expiración": exp,
                         "Dias": s.Dias,
                         "Short Strike": s.Strike,
@@ -667,6 +682,7 @@ def bear_call_spread(df, width_range, delta_range, credit_range):
                 res.append(
                     {
                         "Ticker": sym,
+                        "Precio Acción": s.get("Precio Acción"),
                         "Expiración": exp,
                         "Dias": s.Dias,
                         "Short Strike": s.Strike,
@@ -706,6 +722,7 @@ def iron_condor(df, w_put_range, d_put_range, w_call_range, d_call_range, credit
             res.append(
                 {
                     "Ticker": p.Ticker,
+                    "Precio Acción": p.get("Precio Acción"),
                     "Expiración": p.Expiración,
                     "Dias": p.Dias,
                     "Put Short Strike": p["Short Strike"],
@@ -754,6 +771,7 @@ def iron_fly(df, width_range, delta_range, credit_range):
                 res.append(
                     {
                         "Ticker": sym,
+                        "Precio Acción": s.get("Precio Acción"),
                         "Expiración": exp,
                         "Dias": s.Dias,
                         "Central Strike": s.Strike,
@@ -794,6 +812,7 @@ def jade_lizard(df, w_call_range, d_put_range, d_call_range, credit_range):
                     res.append(
                         {
                             "Ticker": sym,
+                            "Precio Acción": p.get("Precio Acción"),
                             "Expiración": exp,
                             "Dias": p.Dias,
                             "Short Put": p.Strike,
