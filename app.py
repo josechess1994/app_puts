@@ -369,6 +369,7 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
         "Expected Move ($)": "EM $",
         "Expected Move (%)": "EM %",
         "IV Rank": "IVR",
+        "Retorno %": "Return",
         "Premium Edge": "Edge",
         "Cambio 1M (%)": "1M",
         "Cambio 2M (%)": "2M",
@@ -376,6 +377,10 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
         "Cambio 6M (%)": "6M",
     }
     to_show = to_show.rename(columns={k: v for k, v in visible_col_rename.items() if k in to_show.columns})
+
+    if "Exp" in to_show.columns:
+        exp_display = pd.to_datetime(to_show["Exp"], errors="coerce")
+        to_show["Exp"] = exp_display.dt.strftime("%y-%m-%d").fillna(to_show["Exp"].astype(str))
 
     percent_like = [c for c in to_show.columns if "%" in c and pd.api.types.is_numeric_dtype(to_show[c])]
     percent_like += [c for c in ["1M", "2M", "3M", "6M"] if c in to_show.columns and pd.api.types.is_numeric_dtype(to_show[c])]
@@ -391,7 +396,15 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
     if "Edge" in to_show.columns:
         config["Edge"] = st.column_config.TextColumn()
 
-    st.dataframe(to_show, use_container_width=True, hide_index=True, column_config=config)
+    centered_numeric_cols = [
+        c for c in ["DTE", "IVR", "POP (%)", "IV (%)", "EM %", "Return"]
+        if c in to_show.columns
+    ]
+    styled_to_show = to_show.style
+    if centered_numeric_cols:
+        styled_to_show = styled_to_show.set_properties(subset=centered_numeric_cols, **{"text-align": "center"})
+
+    st.dataframe(styled_to_show, use_container_width=True, hide_index=True, column_config=config)
 
 # =========================
 # CONSTRUCCIÓN DE BASE
