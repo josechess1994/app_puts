@@ -382,19 +382,29 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
         exp_display = pd.to_datetime(to_show["Exp"], errors="coerce")
         to_show["Exp"] = exp_display.dt.strftime("%y-%m-%d").fillna(to_show["Exp"].astype(str))
 
-    percent_like = [c for c in to_show.columns if "%" in c and pd.api.types.is_numeric_dtype(to_show[c])]
-    percent_like += [c for c in ["1M", "2M", "3M", "6M"] if c in to_show.columns and pd.api.types.is_numeric_dtype(to_show[c])]
-    money_like = [c for c in ["Price", "Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
-
-    config = {
-        c: st.column_config.NumberColumn(format="%.1f%%") for c in percent_like
+    config = {}
+    number_display_formats = {
+        "Price": "%.2f",
+        "Strike": "%.2f",
+        "Mid": "%.2f",
+        "EM $": "%.1f",
+        "EM %": "%.1f%%",
+        "Edge": "%.2f",
+        "Return": "%.1f%%",
+        "Delta": "%.2f",
+        "POP (%)": "%.1f%%",
+        "IV (%)": "%.1f%%",
+        "IVR": "%d",
+        "1M": "%.1f%%",
+        "2M": "%.1f%%",
+        "3M": "%.1f%%",
+        "6M": "%.1f%%",
     }
-    for c in money_like:
-        config[c] = st.column_config.NumberColumn(format="$%.2f")
+    for col, fmt in number_display_formats.items():
+        if col in to_show.columns and pd.api.types.is_numeric_dtype(to_show[col]):
+            config[col] = st.column_config.NumberColumn(format=fmt)
     if "DTE" in to_show.columns:
         config["DTE"] = st.column_config.NumberColumn(format="%d")
-    if "Edge" in to_show.columns:
-        config["Edge"] = st.column_config.TextColumn()
 
     centered_numeric_cols = [
         c for c in ["DTE", "IVR", "POP (%)", "IV (%)", "EM %", "Return"]
