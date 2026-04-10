@@ -361,18 +361,32 @@ def _render_formatted_table(df, cols_to_show, simple_view=False):
             drop_set = set(drop_cols)
             to_show = to_show[[c for c in to_show.columns if c not in drop_set]]
 
+    visible_col_rename = {
+        "Precio Acción": "Price",
+        "Expiración": "Exp",
+        "OptionType": "Type",
+        "Dias": "DTE",
+        "Premium Edge": "Edge",
+        "Cambio 1M (%)": "1M",
+        "Cambio 2M (%)": "2M",
+        "Cambio 3M (%)": "3M",
+        "Cambio 6M (%)": "6M",
+    }
+    to_show = to_show.rename(columns={k: v for k, v in visible_col_rename.items() if k in to_show.columns})
+
     percent_like = [c for c in to_show.columns if "%" in c and pd.api.types.is_numeric_dtype(to_show[c])]
-    money_like = [c for c in ["Precio Acción", "Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
+    percent_like += [c for c in ["1M", "2M", "3M", "6M"] if c in to_show.columns and pd.api.types.is_numeric_dtype(to_show[c])]
+    money_like = [c for c in ["Price", "Mid", "Mid Credit", "Mid Credit Total", "Strike", "Short Strike", "Long Strike", "Put Short Strike", "Put Long Strike", "Call Short Strike", "Call Long Strike", "Central Strike"] if c in to_show.columns]
 
     config = {
         c: st.column_config.NumberColumn(format="%.1f%%") for c in percent_like
     }
     for c in money_like:
         config[c] = st.column_config.NumberColumn(format="$%.2f")
-    if "Dias" in to_show.columns:
-        config["Dias"] = st.column_config.NumberColumn(format="%d")
-    if "Premium Edge" in to_show.columns:
-        config["Premium Edge"] = st.column_config.TextColumn()
+    if "DTE" in to_show.columns:
+        config["DTE"] = st.column_config.NumberColumn(format="%d")
+    if "Edge" in to_show.columns:
+        config["Edge"] = st.column_config.TextColumn()
 
     st.dataframe(to_show, use_container_width=True, hide_index=True, column_config=config)
 
