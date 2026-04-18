@@ -51,9 +51,22 @@ SESSION.mount("http://", _adapter)
 # =========================
 # AUXILIARES DE DATOS
 # =========================
-@st.cache_data(ttl=86400)
-def load_universe(path="data/merged_universe.csv"):
+def resolve_universe_path(path="data/merged_universe.csv"):
     csv_path = Path(path)
+    if csv_path.is_absolute():
+        return csv_path
+
+    repo_relative = Path(__file__).resolve().parent / csv_path
+    cwd_relative = Path.cwd() / csv_path
+
+    if cwd_relative.exists():
+        return cwd_relative
+    return repo_relative
+
+
+@st.cache_data(ttl=86400)
+def load_universe(path="data/merged_universe.csv", _cache_key=None):
+    csv_path = resolve_universe_path(path)
     if not csv_path.exists():
         st.warning(f"No se encontró el universo en `{path}`. Se usará lista vacía.")
         return []
@@ -922,7 +935,9 @@ st.set_page_config(page_title="Filtro Estrategias Opciones", layout="wide")
 st.title("⚡ Filtro Base + Estrategias (S&P 500)")
 
 # 0) Tickers con “Seleccionar todos / Ninguno”
-symbols = load_universe()
+_universe_path = resolve_universe_path("data/merged_universe.csv")
+_universe_cache_key = _universe_path.stat().st_mtime_ns if _universe_path.exists() else "missing"
+symbols = load_universe(str(_universe_path), _cache_key=_universe_cache_key)
 all_tickers = symbols
 st.sidebar.caption(f"Universo cargado: {len(symbols)} tickers")
 if symbols:
