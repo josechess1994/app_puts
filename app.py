@@ -9,6 +9,7 @@ import unicodedata
 from itertools import repeat
 from datetime import datetime, timedelta
 from datetime import datetime
+from pathlib import Path
 from scipy.stats import norm
 import yfinance as yf
 from requests.adapters import HTTPAdapter
@@ -50,6 +51,40 @@ SESSION.mount("http://", _adapter)
 # =========================
 # AUXILIARES DE DATOS
 # =========================
+@st.cache_data(ttl=86400)
+def load_universe(path="data/merged_universe.csv"):
+    csv_path = Path(path)
+    if not csv_path.exists():
+        st.warning(f"No se encontró el universo en `{path}`. Se usará lista vacía.")
+        return []
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        st.warning(f"No se pudo leer `{path}`. Se usará lista vacía.")
+        return []
+
+    if "symbol" not in df.columns:
+        st.warning(f"El CSV `{path}` no contiene la columna `symbol`. Se usará lista vacía.")
+        return []
+
+    symbols = (
+        df["symbol"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .replace({"": np.nan})
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    if not symbols:
+        st.warning(f"El CSV `{path}` no tiene símbolos válidos. Se usará lista vacía.")
+
+    return symbols
+
+
 @st.cache_data(ttl=86400)
 def obtener_tickers_sp500():
     import io
@@ -887,7 +922,14 @@ st.set_page_config(page_title="Filtro Estrategias Opciones", layout="wide")
 st.title("⚡ Filtro Base + Estrategias (S&P 500)")
 
 # 0) Tickers con “Seleccionar todos / Ninguno”
-all_tickers = obtener_tickers_sp500()
+symbols = load_universe()
+all_tickers = symbols
+st.sidebar.caption(f"Universo cargado: {len(symbols)} tickers")
+if symbols:
+    st.sidebar.caption("Preview (primeros 20): " + ", ".join(symbols[:20]))
+else:
+    st.sidebar.warning("Universo vacío. Revisa `data/merged_universe.csv`.")
+
 if "tickers_sel" not in st.session_state:
     st.session_state["tickers_sel"] = all_tickers[:]  # por defecto todos
 
